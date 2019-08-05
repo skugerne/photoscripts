@@ -101,7 +101,7 @@ def one_image(path):
 					print("(%s) (%s) %s = %s" % (ifd,tag,piexif.TAGS[ifd][tag]["name"], val))
 					
 		if args.adjust_date:
-			changeto = parsedate(exif_dict["Exif"][piexif.ExifIFD.DateTimeDigitized]) + datetime.timedelta(hours=args.adjust_date)
+			changeto = parsedate(exif_dict["Exif"][piexif.ExifIFD.DateTimeDigitized]) + datetime.timedelta(minutes=args.adjust_date)
 			exif_dict["0th"][piexif.ImageIFD.DateTime] = changeto.strftime("%Y:%m:%d %H:%M:%S")
 			exif_dict["Exif"][piexif.ExifIFD.DateTimeOriginal] = changeto.strftime("%Y:%m:%d %H:%M:%S")
 			exif_bytes = piexif.dump(exif_dict)
@@ -206,13 +206,28 @@ def do_work():
 	print("Processed: ")
 	for kv in summary.items():
 		print("  %s: %s" % kv)
-				
-				
+		
+		
+		
+def hhmm(input):
+	try:
+		m = re.match("^(-?)(\d+):(\d+)$",input)
+		sign = -1 if m.group(1) else 1
+		hours = int(m.group(2))
+		mins = int(m.group(3))
+		if mins < 0 or mins > 60: raise Exception("The given minutes are not acceptable.")
+		return sign * (hours * 60 + minutes)
+	except Exception as err:
+		raise TypeError(str(err))
+	
+						
 				
 def dims(input):
 	try:
 		a,b = input.split(',')
-		return int(a), int(b)
+		a,b = int(a),int(b)
+		if a <= 0 or b <= 0: raise Exception("The given dimensions are not acceptable.")
+		return a,b
 	except Exception as err:
 		raise TypeError(str(err))
 	
@@ -227,7 +242,7 @@ group.add_argument('--dry-run', help='see what changes should be made, but don\'
 group = parser.add_mutually_exclusive_group(required=True)
 group.add_argument('--print-all-tags', help='print all tags on target images', action="store_true")
 group.add_argument('--print-some-tags', help='print the interesting tags on target images', action="store_true")
-group.add_argument('--adjust-date', metavar='HOURS', type=int, help='adjust the stored Exif DateTime to be the specified number of hours different than DateTimeOriginal')
+group.add_argument('--adjust-date', metavar='HH:MM', type=hhmm, help='adjust the stored Exif DateTime to be the specified number of hours and minutes different than DateTimeOriginal')
 group.add_argument('--scale-percent', metavar='PERC', type=float, help='scale images to the given percentage of original size')
 group.add_argument('--rename-images', help='rename images based on exif date data', action="store_true")
 parser.add_argument('--filter-min-size', metavar='W,H', type=dims, help='only process images that are larger than the given dimentions')
