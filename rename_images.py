@@ -55,13 +55,23 @@ def compare_images(path1, path2, expect_match):
 
 
 def one_image(path):
-	if path.lower().endswith(".cr2") and args.scale_percent:
-		return 0
-	elif os.path.splitext(path.lower())[1] not in (".jpg",".jpeg",".cr2"):
+	if os.path.splitext(path.lower())[1] not in (".jpg",".jpeg"):
 		return 0
 		
+	# a raw image may or may not exist, but we generally would want to keep any raw sync-ed up with its jpeg
+	path_raw = os.path.splitext(path)[0] + ".cr2"
+		
+	if args.edit_in_place or args.dry_run:
+		outpath = path
+		outpath_raw = path_raw
+	elif args.output_path:
+		_, filepart = os.path.split(path)
+		outpath = os.path.join(args.output_path, filepart)
+		_, filepart = os.path.split(path_raw)
+		outpath_raw = os.path.join(args.output_path, filepart)
+		
 	with Image.open(path) as imgobj:
-		if 'exit' in imgobj.info:
+		if 'exif' in imgobj.info:
 			exif_dict = piexif.load(imgobj.info['exif'])
 		else:
 			print("Keys in image info: %s" % sorted(imgobj.info.keys()))
@@ -71,15 +81,10 @@ def one_image(path):
 			return 0
 		if args.filter_min_pixels and (imgobj.size[0] * imgobj.size[1] <= args.filter_min_pixels[0] * args.filter_min_pixels[1]):
 			return 0
-		
-		if args.edit_in_place:
-			outpath = path
-		elif args.output_path:
-			_, filepart = os.path.split(path)
-			outpath = os.path.join(args.output_path, filepart)
 			
 		if args.print_some_tags:
-			print("Dims:   %s x %s" % (exif_dict["0th"][piexif.ImageIFD.ImageWidth],exif_dict["0th"][piexif.ImageIFD.ImageLength]))
+			print("Dims 1: %s x %s" % (exif_dict["0th"].get(piexif.ImageIFD.ImageWidth),exif_dict["0th"].get(piexif.ImageIFD.ImageLength)))
+			print("Dims 2: %s x %s" % (exif_dict["Exif"].get(piexif.ExifIFD.PixelXDimension),exif_dict["Exif"].get(piexif.ExifIFD.PixelYDimension)))
 			print("Date 1: %s" % parsedate2(exif_dict["0th"][piexif.ImageIFD.DateTime]))
 			print("Date 2: %s" % parsedate2(exif_dict["Exif"][piexif.ExifIFD.DateTimeOriginal]))
 			print("Date 3: %s" % parsedate2(exif_dict["Exif"][piexif.ExifIFD.DateTimeDigitized]))
@@ -122,27 +127,49 @@ def one_image(path):
 			compare_files(path, args.temporary_file, False)
 			compare_images(path, args.temporary_file, False)
 			
+		# the image object is closed here, now we can replace or delete the original jpeg
+			
 	if args.adjust_date or args.scale_percent:
-		shutil.move(args.temporary_file, outpath)
-		if args.edit_in_place and os.path.exists(path):
-			os.unlink(path)
+		# we have theoretically made a temporary file with the contents we want, now we can get it where it needs to go
+		if args.dry_run:
+			print("Edit '%s'." % path)
+		else:
+			shutil.move(args.temporary_file, outpath)
+		if os.path.exists(path_raw) and path_raw != outpath_raw:
+			# the optional raw file is handled differently, as there is no modification and no temporary raw file
+			if args.edit_in_place:
+				shutil.move(path_raw, outpath_raw)
+			elif args.output_path:
+				shutil.copy2(path_raw, outpath_raw)
+			else:
+				print("Edit '%s'." % path_raw)
 				
 	if args.rename_images:
-		changeto = parsedate(exif_dict["Exif"][piexif.ExifIFD.DateTimeDigitized]).strftime("img_%Y%m%d_%H%M%S")
+		changeto = parsedate(exif_dict["Exif"][piexif.ExifIFD.DateTimeOriginal]).strftime("img_%Y%m%d_%H%M%S")
 		outpath, filepart = os.path.split(outpath)
 		extra = 0
-		finaloutpath = os.path.join(outpath, changeto+".jpg")
-		while os.path.exists(finaloutpath):
+		finaloutpath = os.path.join(outpath, changeto+".jpg")      # deal with name conflicts
+		finaloutpath_raw = os.path.join(outpath, changeto+".cr2")  # raw follows along if it exists
+		while os.path.exists(finaloutpath) and path != finaloutpath:
 			extra += 1
 			finaloutpath = os.path.join(outpath, "%s.%d.jpg" % (changeto,extra))
+			finaloutpath_raw = os.path.join(outpath, "%s.%d.cr2" % (changeto,extra))
 			if extra > 100:    # because I don't trust unbounded loops
 				raise Exception("Apparent runaway extra for %s." % path)
+				
 		if path == finaloutpath:
 			return 0
+		
 		if args.edit_in_place:
-			shutil.move(path, finaloutpath)
+			func = shutil.move
+		elif args.output_path:
+			func = shutil.copy2
 		else:
-			shutil.copy2(path, finaloutpath)
+			func = lambda x,y: print("Move '%s' to '%s'." % (x,y))
+		
+		func(path, finaloutpath)
+		if os.path.exists(path_raw):
+			func(path_raw, finaloutpath_raw)
 	
 	return 1
 
@@ -195,7 +222,8 @@ parser = argparse.ArgumentParser(description='Rename, adjust, or examine images.
 parser.add_argument('targets', metavar='PATHS', nargs='+', help='one or more files or directories to process (recursive)')
 group = parser.add_mutually_exclusive_group()
 group.add_argument('--edit-in-place', help='edit images in place', action="store_true")
-group.add_argument('--output-path', metavar='PATH', help='a path to write result files to')
+group.add_argument('--output-path', metavar='PATH', help='a path to write result files to, leaving the source files unmodified (unless the output overlaps with the source)')
+group.add_argument('--dry-run', help='see what changes should be made, but don\'t actually make any', action="store_true")
 group = parser.add_mutually_exclusive_group(required=True)
 group.add_argument('--print-all-tags', help='print all tags on target images', action="store_true")
 group.add_argument('--print-some-tags', help='print the interesting tags on target images', action="store_true")
@@ -209,8 +237,8 @@ parser.add_argument('--temporary-file', metavar='PATH', help='a file to use as a
 args = parser.parse_args()
 
 if args.rename_images or args.scale_percent or args.adjust_date:
-	if not (args.edit_in_place or args.output_path):
-		print("When modifying images, one of --edit-in-place or --output-path must be given.")
+	if not (args.edit_in_place or args.output_path or args.dry_run):
+		print("When modifying images, one of --edit-in-place, --output-path or --dry-run must be given.")
 		exit(1)
 		
 if not args.temporary_file:

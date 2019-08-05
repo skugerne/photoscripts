@@ -25,6 +25,7 @@ args = parser.parse_args()
 print("Target dir: '%s'. " % args.jpegs)
 jpegs = [bits(args.jpegs,x) for x in os.listdir(args.jpegs)]
 jpegs = [x for x in jpegs if x['ext'] in ('.jpg','.jpeg')]
+jpegs = sorted(jpegs, key=lambda x: x['base'])  # removing the ext changes sorting in some cases
 if jpegs:
 	print("Have found %s jpeg images." % len(jpegs))
 else:
@@ -39,6 +40,7 @@ args.raws = args.raws.strip('"').strip("'")   # windows: trailing slashes before
 print("Target dir: '%s'. " % args.raws)
 raws = [bits(args.raws,x) for x in os.listdir(args.raws)]
 raws = [x for x in raws if x['ext'] == '.cr2']
+raws = sorted(raws, key=lambda x: x['base'])  # removing the ext changes sorting in some cases
 if raws:
 	print("Have found %s raw images." % len(raws))	
 else:
