@@ -18,13 +18,22 @@ from collections import defaultdict
 from multiprocessing import cpu_count
 from multiprocessing.dummy import Pool as ThreadPool
 
+try:
+    import PIL.Image as Image
+except ImportError:
+    print("Failed to import PIL/Pillow library, will fail if any image should be evaluated for replacement.")
+    Image = None
+
 
 
 # globals
 logger = None
 args = None
-filter_summary = None
+filter_summary = {'rejected': defaultdict(lambda: 0), 'passed': defaultdict(lambda: 0)}
 all_inventories = dict()
+
+all_media_files = ('.jpg','.jpeg','.png','.tif','.tiff','.gif','.mp4','.mov','.avi','.wmv','.mpg','cr2')
+all_image_files = ()
 
 
 
@@ -317,13 +326,14 @@ def directory_inventory(directory, remove_directory=None, recursive=True, ignore
 
 
 
-def compare_inventories(inventory1, inventory2, print_limit=5):
+def compare_inventories(inventory1, inventory2, print_limit=5, callback=None):
     """
     Compared two directory inventories, return True if they match, False otherwise.
 
     inventory1:     a result from directory_inventory(): a sorted list of (name,size,checksum) tuples for files in a directory
     inventory2:     another object similar to the first
     print_limit:    limit how many differences to print
+    callback:       a function to invoke with two tuples (name,size,checksum), the first from 'inventory1', when a difference is found
     """
 
     logger.debug("The lengths of the inventories are (old) %s and (new) %s." % (len(inventory1),len(inventory2)))
@@ -337,17 +347,23 @@ def compare_inventories(inventory1, inventory2, print_limit=5):
         idx2 = 0
         while idx1 < len(inventory1) and idx2 < len(inventory2):
             if inventory1[idx1][0] == inventory2[idx2][0]:
+                issue = False
                 if(inventory1[idx1][1] != inventory2[idx2][1]):
                     diffs0.append("Size mismatch for '%s' (oi=%s, ni=%s)." % (inventory1[idx1][0],idx1,idx2))
+                    issue = True
                 if(inventory1[idx1][2] != inventory2[idx2][2]):
                     diffs0.append("Checksum mismatch for '%s' (oi=%s, ni=%s)." % (inventory1[idx1][0],idx1,idx2))
+                    issue = True
+                if issue and callback: callback(inventory1[idx1],inventory2[idx2])
                 idx1 += 1
                 idx2 += 1
             elif inventory1[idx1][0] > inventory2[idx2][0]:
                 diffs1.append("The new inventory contains an extra file '%s' (oi=%s, ni=%s)." % (inventory2[idx2][0],idx1,idx2))
+                if callback: callback(None,inventory2[idx2])
                 idx2 += 1
             else:
                 diffs2.append("The old inventory contains an extra file '%s' (oi=%s, ni=%s)." % (inventory1[idx1][0],idx1,idx2))
+                if callback: callback(inventory1[idx1],None)
                 idx1 += 1
 
         # notice if all of one came before all of the other
@@ -357,11 +373,13 @@ def compare_inventories(inventory1, inventory2, print_limit=5):
         # finish the stragglers
         while idx2 < len(inventory2):
             diffs1.append("The new inventory contains an extra file '%s' (oi=%s, ni=%s)." % (inventory2[idx2][0],idx1,idx2))
+            if callback: callback(None,inventory2[idx2])
             idx2 += 1
 
         # finish the stragglers
         while idx1 < len(inventory1):
             diffs2.append("The old inventory contains an extra file '%s' (oi=%s, ni=%s)." % (inventory1[idx1][0],idx1,idx2))
+            if callback: callback(inventory1[idx1],None)
             idx1 += 1
 
         # report while limiting spam
@@ -381,10 +399,10 @@ def compare_inventories(inventory1, inventory2, print_limit=5):
 
         counter = len(diffs0) + len(diffs1) + len(diffs2)
         if counter > 0:
-            logger.error("The manifest does not match the directory (%s differences)." % counter)
+            logger.error("The two inventories do not match (%s differences)." % counter)
             return False
 
-        logger.info("The manifest matches the directory (checked %s files)." % len(inventory1))
+        logger.info("The two inventories match (checked %s files)." % len(inventory1))
         return True
     except (IndexError,KeyError) as err:
         logger.error("Exception " + str(type(err)) + " while comparing manifests.", exc_info=True)
@@ -680,13 +698,142 @@ def load_json(json_file):
 
 
 
+def write_json(out_path, some_object):
+    """
+    Write an object to a file as JSON, encoded as UTF8 with a BOM.
+
+    If your object contains keys or values which are encoded non-ASCII bytes already, it is likely that you will get an encoding error.
+    """
+
+    with open(out_path,'wb') as fh:
+        txt = json.dumps(some_object, indent=2, ensure_ascii=False)    # indent: formatted JSON so people can read it
+        fh.write(txt.encode('utf-8-sig'))
+        
+        
+        
+        
+def check_image(filename):
+    """
+    Check that the given file is a loadable image, if it is an image.
+    
+    Raises an exception if there is a problem.
+    """
+    
+    _, ext = os.path.splitext(filename.lower())
+    if ext in all_image_files:   # will prevent accepting a corrupted file
+        if Image is None:
+            raise Exception("Unable to verify image because PIL/Pillow library was not loaded.")
+        try:
+            img = Image.open(filename)
+            logger.info("  Image %s could be loaded." % filename)
+        except (IOError,ValueError) as err:
+            txt = str(err) or str(type(err))
+            logger.warning("Exception suggestive of an invaid image while loading %s: %s" % (filename,txt))
+            raise
+
+
+
+def read_stdin_yesno(q):
+    """
+    Prompt the user for a yes/no and return True or False.
+    """
+    
+    first = True
+    while True:
+        if first:
+            logger.info(q)
+        else:
+            logger.info("(enter 'y' or 'n' or similar)")
+            
+        line = sys.stdin.readline().strip()
+        if line:
+            if line.lower() in ('y','yes'):
+                return True
+            if line.lower() in ('n','no'):
+                return False
+        logger.info("line: %s" % line)
+        first = False
+
+
+
+def compare_inventories_with_patching(old_inventory, inventory, patch=False):
+    """
+    Compare two inventories, and patch the new one if appropriate.  Without patching, is just a wrapper on compare_inventories().
+
+    Return the a tuple including the return from compare_inventories(), and the new inventory, which may have been revised.
+    """
+
+    compared = []
+    to_delete = []
+    to_add = []
+    def comparison_callback(old_tuple, new_tuple):
+        compared.append(True)   # callback-happy way to note that we have compared something
+
+        if new_tuple:
+            check_image(new_tuple[0])
+
+        if old_tuple and new_tuple:
+            # has been changed
+            if new_tuple[0] != old_tuple[0]:
+                raise Exception("File names do not match.  They should.")
+            logger.info("  Sizes: old %s vs new %s, Checksums: old 0x%X vs new 0x%X." % (old_tuple[1],new_tuple[1],old_tuple[2],new_tuple[2]))
+            if read_stdin_yesno("Should we update the inventory entry for file: %s" % old_tuple[0]):
+                logger.info("Suggestion accepted; Should leave the entry in the new inventory (because its values are correct).")
+            else:
+                logger.info("Suggestion rejected; Should replace entry in the new inventory with the old values.")
+                to_delete.append(new_tuple)
+                to_add.append(old_tuple)
+        elif old_tuple:
+            # has gone away
+            if read_stdin_yesno("Should we remove the inventory entry for file: %s" % old_tuple[0]):
+                logger.info("Suggestion accepted; Should leave entry out of the new inventory (because it shouldn't be there).")
+            else:
+                logger.info("Suggestion rejected; Should add entry to new inventory (because it should still be there).")
+                to_add.append(old_tuple)
+        else:
+            # has been added
+            if read_stdin_yesno("Should we add an inventory entry for file: %s" % new_tuple[0]):
+                logger.info("Suggestion accepted; Should leave the entry in the new inventory (because its supposed to be there).")
+            else:
+                logger.info("Suggestion rejected; Should delete entry from the new inventory (because its not supposed to be there).")
+                to_delete.append(new_tuple)
+
+    # disable the callback if we aren't doing patching of inventories
+    if not patch:
+        comparison_callback = None
+
+    # compare
+    happy = compare_inventories(old_inventory,inventory,callback=comparison_callback)
+
+    # deal with changes approved by the callback
+    if compared:
+        inventory = inventory[:]   # copy the inventory which was provided
+
+        # add and remove items from the copy as requested by the 'patch'
+        for item in to_delete:
+            logger.debug("Remove from inventory: %s" % str(item))
+            inventory.remove(item)
+        for item in to_add:
+            logger.debug("Add to inventory: %s" % str(item))
+            if item in inventory:
+                raise Exception("Trying to add something to the inventory that exists already, must be programmer error.")
+            inventory.append(item)
+        inventory = sorted(inventory, key=lambda f: f[0])
+
+    return happy, inventory
+
+
 
 def process_one_directory(d, parallel, inventory_file_name='inventory.json', also_non_image_files=False, patch=False, replace_inventory_files=False):
+    """
+    Given a directory, create a new inventory for it and compare it to the existing inventory, if such a file exists.
+    """
+    
     def our_filter_func(name, countas=1):
         if name.startswith(".") or name == inventory_file_name or name in ('Thumbs.db','Desktop.ini'):
             return False
         _, ext = os.path.splitext(name.lower())
-        if not (also_non_image_files or ext in ('.jpg','.jpeg','.png','.tif','.tiff','.gif','.mp4','.mov','.avi','.wmv','.mpg','cr2')):
+        if not (also_non_image_files or ext in all_media_files):
             logger.debug("Filter reject: %s" % name)
             filter_summary['rejected'][ext] += countas
             return False
@@ -696,7 +843,7 @@ def process_one_directory(d, parallel, inventory_file_name='inventory.json', als
     try:
         start_time = datetime.datetime.now()
 
-        logger.info("Process %s." % d)
+        logger.info("Process: %s" % d)
         inventory = directory_inventory(d, remove_directory=True, recursive=False, filter_func=our_filter_func, escape_non_ascii=False, parallel=parallel)
         all_inventories[d] = inventory
 
@@ -707,11 +854,12 @@ def process_one_directory(d, parallel, inventory_file_name='inventory.json', als
             for name,file_size,checksum in inventory:
                 size += file_size
             szstr = format_bytes(size)
-            logger.info("Spent %s on %s of files (%0.01f MB/sec)." % (etstr,szstr,(size/(1024.0*1024.0*et))))
+            logger.info("  Spent %s on %s of files (%0.01f MB/sec)." % (etstr,szstr,(size/(1024.0*1024.0*et))))
 
         path = os.path.join(d,inventory_file_name)
+        revised_inventory = False
         if os.path.exists(path):
-            logger.info("An inventory file exists.")
+            logger.info("  An inventory file exists.")
             try:
                 old_inventory = load_json(path)
             except ValueError as err:
@@ -719,20 +867,27 @@ def process_one_directory(d, parallel, inventory_file_name='inventory.json', als
                 happy = False
             else:
                 old_inventory = sorted([x for x in old_inventory if our_filter_func(x[0],countas=0)], key=lambda f: f[0])  # applies the current filter to the old inventory
-                happy = compare_inventories(old_inventory,inventory)
+                happy, revised_inventory = compare_inventories_with_patching(old_inventory, inventory, patch)
+                if revised_inventory == inventory:
+                    logger.debug("The new inventory was not revised via patching.")
+                    if happy:
+                        revised_inventory = False   # happy and no revisions, so don't overwrite on disk
+                elif not patch:
+                    raise Exception("The new inventory has been revised, but it should have remained identical.")
+                else:
+                    logger.info("The new inventory has been revised via patching.")
+                    inventory = revised_inventory
         else:
             happy = None
 
-        if replace_inventory_files or happy is None:
+        if replace_inventory_files or revised_inventory or happy is None:
             logger.debug("An inventory file will be created.")
-            with open(path,'wb') as fh:
-                txt = json.dumps(inventory, indent=2, ensure_ascii=False)
-                fh.write(txt.encode('utf-8-sig'))
+            write_json(path, inventory)
 
             if happy:
                 return True, "replaced with same"
             elif happy is False:
-                return False, "replaced with fix"
+                return bool(patch), "replaced with fix"
             else:
                 return True, "created"
         elif happy:
@@ -746,6 +901,10 @@ def process_one_directory(d, parallel, inventory_file_name='inventory.json', als
 
 
 def process_all_subdirectories(d, summary, parallel, inventory_file_name, also_non_image_files, patch, replace_inventory_files):
+    """
+    Recursively process directories, adding and/or verifying inventory files in each.
+    """
+
     happy,message = process_one_directory(d, parallel, inventory_file_name, also_non_image_files, patch, replace_inventory_files)
     summary['counts'][message] += 1
     if not happy:
@@ -784,7 +943,6 @@ def summarize_duplicates():
 def main():
     global args
     global logger
-    global filter_summary
 
     # parse arguments
     parser = argparse.ArgumentParser(description='Create or verify an inventory for a directory.')
@@ -806,7 +964,7 @@ def main():
         # on Windows, expand special characters (on Linux, would perhaps expand previously escaped characters)
         targets = []
         for t in args.directories:
-            globbed = glob.glob(t.rtrim(r'/\'))
+            globbed = glob.glob(t.rstrip(r'\/'))
             targets += globbed
         args.directories = targets
 
@@ -820,8 +978,6 @@ def main():
                 logger.error("The parameter '%s' is not a directory." % d)
                 logger.error("The program can not continue.")
                 exit(-1)
-
-        filter_summary = {'rejected': defaultdict(lambda: 0), 'passed': defaultdict(lambda: 0)}
 
         start_time = datetime.datetime.now()
 
