@@ -17,12 +17,7 @@ import glob
 from collections import defaultdict
 from multiprocessing import cpu_count
 from multiprocessing.dummy import Pool as ThreadPool
-
-try:
-    import PIL.Image as Image
-except ImportError:
-    print("Failed to import PIL/Pillow library, will fail if any image should be evaluated for replacement.")
-    Image = None
+import PIL.Image as Image
 
 
 
@@ -33,11 +28,11 @@ filter_summary = {'rejected': defaultdict(lambda: 0), 'passed': defaultdict(lamb
 all_inventories = dict()
 
 all_media_files = ('.jpg','.jpeg','.png','.tif','.tiff','.gif','.mp4','.mov','.avi','.wmv','.mpg','cr2')
-all_image_files = ()
+checkable_image_files = ('.jpg','.jpeg')
 
 
 
-def setup_logger(name, path=None, file_level=logging.DEBUG, console_level=logging.WARN, num_old_logs=5, use_pid=False, use_log_subdir=True, log_threadids=False, rotate_mbytes=None, log_time_to_console=False):
+def setup_logger(name, path=None, file_level=logging.DEBUG, console_level=logging.WARN, num_old_logs=2, use_pid=False, use_log_subdir=True, log_threadids=False, rotate_mbytes=None, log_time_to_console=False):
     """
     Setup a standard 'root logger' object.
 
@@ -294,6 +289,7 @@ def directory_inventory(directory, remove_directory=None, recursive=True, ignore
             try:
                 logger.debug(u"ID file %s of %s: '%s'" % (idx+1,len(files),cleanse_bytes(aFile)))
                 (size,checksum) = make_file_id(aFile, calculate_checksums)
+                check_image(aFile)
                 if remove_directory:
                     if aFile.startswith(remove_directory):
                         aFile = aFile[len(remove_directory):]
@@ -326,7 +322,7 @@ def directory_inventory(directory, remove_directory=None, recursive=True, ignore
 
 
 
-def compare_inventories(inventory1, inventory2, print_limit=5, callback=None):
+def compare_inventories_inner(inventory1, inventory2, print_limit=5, callback=None):
     """
     Compared two directory inventories, return True if they match, False otherwise.
 
@@ -692,14 +688,15 @@ def check_image(filename):
     Raises an exception if there is a problem.
     """
     
+    if not args.test_load_images:
+        return
+
     _, ext = os.path.splitext(filename.lower())
-    if ext in all_image_files:   # will prevent accepting a corrupted file
-        if Image is None:
-            raise Exception("Unable to verify image because PIL/Pillow library was not loaded.")
+    if ext in checkable_image_files:   # will prevent accepting a corrupted file
         try:
-            img = Image.open(filename)
-            logger.info("  Image %s could be loaded." % filename)
-        except (IOError,ValueError) as err:
+            assert Image.open(filename), "False-ey result from loading image."
+            logger.debug("  Image %s could be loaded." % filename)
+        except (IOError,ValueError,AssertionError) as err:
             txt = str(err) or str(type(err))
             logger.warning("Exception suggestive of an invaid image while loading %s: %s" % (filename,txt))
             raise
@@ -729,11 +726,11 @@ def read_stdin_yesno(q):
 
 
 
-def compare_inventories_with_patching(old_inventory, inventory, patch=False):
+def compare_inventories(old_inventory, inventory):
     """
-    Compare two inventories, and patch the new one if appropriate.  Without patching, is just a wrapper on compare_inventories().
+    Compare two inventories, and patch the new one if appropriate.
 
-    Return the a tuple including the return from compare_inventories(), and the new inventory, which may have been revised.
+    Return the a tuple including the return from compare_inventories_inner(), and the new inventory, which may have been revised.
     """
 
     compared = []
@@ -741,9 +738,6 @@ def compare_inventories_with_patching(old_inventory, inventory, patch=False):
     to_add = []
     def comparison_callback(old_tuple, new_tuple):
         compared.append(True)   # callback-happy way to note that we have compared something
-
-        if new_tuple:
-            check_image(new_tuple[0])
 
         if old_tuple and new_tuple:
             # has been changed
@@ -771,12 +765,13 @@ def compare_inventories_with_patching(old_inventory, inventory, patch=False):
                 logger.info("Suggestion rejected; Should delete entry from the new inventory (because its not supposed to be there).")
                 to_delete.append(new_tuple)
 
-    # disable the callback if we aren't doing patching of inventories
-    if not patch:
-        comparison_callback = None
+    if args.patch:
+        callback = comparison_callback
+    else:
+        callback = None
 
     # compare
-    happy = compare_inventories(old_inventory,inventory,callback=comparison_callback)
+    happy = compare_inventories_inner(old_inventory,inventory,callback=callback)
 
     # deal with changes approved by the callback
     if compared:
@@ -836,11 +831,12 @@ def process_one_directory(d):
             try:
                 old_inventory = load_json(path)
             except ValueError as err:
-                logger.warning("JSON: " + str(err))
+                logger.error("Failure loading old inventory., unable to compare it to the new one.")
+                logger.error("JSON: " + str(err), exc_info=True)
                 happy = False
             else:
                 old_inventory = sorted([x for x in old_inventory if our_filter_func(x[0],countas=0)], key=lambda f: f[0])  # applies the current filter to the old inventory
-                happy, revised_inventory = compare_inventories_with_patching(old_inventory, inventory, args.patch)
+                happy, revised_inventory = compare_inventories(old_inventory, inventory)
                 if revised_inventory == inventory:
                     logger.debug("The new inventory was not revised via patching.")
                     if happy:
@@ -878,7 +874,7 @@ def process_all_subdirectories(d, summary):
     Recursively process directories, adding and/or verifying inventory files in each.
     """
 
-    happy,message = process_one_directory(d, summary)
+    happy,message = process_one_directory(d)
     summary['counts'][message] += 1
     if not happy:
         summary['failed paths'].append(d)
@@ -924,6 +920,7 @@ def main():
     group.add_argument('--create', help='create new inventories and check existing ones, but do not update any', action="store_true")
     group.add_argument('--patch', help='query to approve updates to the inventory files', action="store_true")
     group.add_argument('--replace-inventory-files', help='replace inventory files without considering their correctness', action="store_true")
+    parser.add_argument('--test-load-images', help='attempt to load cetain images to see if they appear to be valid', action="store_true")
     parser.add_argument('--also-non-image-files', help='include almost any file in the inventory (by default, only common image formats are included)', action="store_true")
     parser.add_argument('--inventory-file-name', metavar='NAME', help='the name of the inventory file, without path (default: %(default)s)', default="inventory.json")
     parser.add_argument('--single-thread', help='process using only one thread (by default, uses one thread per CPU thread)', action="store_true")
