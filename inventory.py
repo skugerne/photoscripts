@@ -7,7 +7,7 @@ Make and verify inventory files.
 import os
 import sys
 import shutil
-import hashlib
+import hashlib, math
 import datetime
 import json
 import logging
@@ -15,11 +15,16 @@ from logging.handlers import RotatingFileHandler
 import argparse
 import glob
 from collections import defaultdict
+from multiprocessing import cpu_count
+from multiprocessing.dummy import Pool as ThreadPool
+
+
 
 # globals
 logger = None
 args = None
 filter_summary = None
+all_inventories = dict()
 
 
 
@@ -221,7 +226,7 @@ def make_file_id(path, calculate_checksums=True):
     if not calculate_checksums:
         return (size,0)
 
-    blocksize = 65536
+    blocksize = 32 * 1024 * 1024
     with open(path, 'rb') as fh:
         buf = fh.read(blocksize)
         if calculate_checksums and calculate_checksums is not True and calculate_checksums.lower() == 'crc32':
@@ -247,7 +252,7 @@ def make_file_id(path, calculate_checksums=True):
 
 
 
-def directory_inventory(directory, remove_directory=None, recursive=True, ignore_files=None, filter_func=None, calculate_checksums=True, escape_non_ascii=True, threadsafe_mode=False):
+def directory_inventory(directory, remove_directory=None, recursive=True, ignore_files=None, filter_func=None, calculate_checksums=True, escape_non_ascii=True, parallel=True):
     """
     Produce a list of tuples (name,size,checksum) for the files in the given directory.  Name is native unicode.
 
@@ -258,7 +263,6 @@ def directory_inventory(directory, remove_directory=None, recursive=True, ignore
     filter_func:          when specified, must return a True-ey value for any acceptable file name to be included (path is not included)
     calculate_checksums:  when True-ey, calculate a checksum for each file, by default sha256, with "crc32" and "md5" as valid alternatives
     escape_non_ascii:     when True-ey, replace various characters in the filenames with a (0xFF) notation, note does not escape existing (0xFF) in filenames
-    threadsafe_mode:      when True-ey, tolerate files going missing during the inventory making (allow for concurrent threads or processes modifying the file structure)
     """
 
     # remove all directory components except the last
@@ -270,32 +274,45 @@ def directory_inventory(directory, remove_directory=None, recursive=True, ignore
 
     files = list()
     file_lister(directory, files, recursive=recursive, ignore_files=ignore_files, filter_func=filter_func)
+    if len(files) > 1 and cpu_count() > 1 and parallel:
+        pool = ThreadPool(cpu_count())
+    else:
+        pool = None
 
     checksums = list()
     for idx,aFile in enumerate(files):
-        logger.debug(u"ID file %s of %s: '%s'" % (idx+1,len(files),cleanse_bytes(aFile)))
-        (size,checksum) = (0,0)
-        try:
-            (size,checksum) = make_file_id(aFile, calculate_checksums)
-        except:
-            if not threadsafe_mode:
-                raise
-        if(remove_directory):
-            if(aFile.startswith(remove_directory)):
-                aFile = aFile[len(remove_directory):]
-                aFile = aFile.lstrip(os.path.sep)   # if part of the path is removed, what remains can not start with the directory separator
-            else:
-                raise Exception("Unable to remove directory from path.")
+        def worker(idx,aFile):
+            try:
+                logger.debug(u"ID file %s of %s: '%s'" % (idx+1,len(files),cleanse_bytes(aFile)))
+                (size,checksum) = make_file_id(aFile, calculate_checksums)
+                if remove_directory:
+                    if aFile.startswith(remove_directory):
+                        aFile = aFile[len(remove_directory):]
+                        aFile = aFile.lstrip(os.path.sep)   # if part of the path is removed, what remains can not start with the directory separator
+                    else:
+                        raise Exception("Unable to remove directory from path.")
 
-        if running_on_windows():
-            aFile = aFile.replace("\\","/")       # we need to standardize the path separator so it works between platforms
-        aFile = cleanse_bytes(aFile, non_compliance_long_notation=escape_non_ascii)
+                if running_on_windows():
+                    aFile = aFile.replace("\\","/")       # we need to standardize the path separator so it works between platforms
+                aFile = cleanse_bytes(aFile, non_compliance_long_notation=escape_non_ascii)
 
-        checksums.append((aFile, size, checksum))
+                checksums.append((aFile, size, checksum))
+            except Exception as err:
+                logger.error("Exception " + str(type(err)) + " while examining a file.", exc_info=True)
+        if pool:
+            pool.apply_async(worker, (idx,aFile))
+        else:
+            worker(idx,aFile)
+
+    if pool:
+        pool.close()
+        pool.join()
+
+    if len(checksums) != len(files):
+        raise Exception("It seems that not all worker jobs suceeded (%s vs %s)." % (len(checksums),len(files)))
 
     # sort by the file names to make comparison easy
     checksums = sorted(checksums, key=lambda f: f[0])
-
     return checksums
 
 
@@ -321,16 +338,16 @@ def compare_inventories(inventory1, inventory2, print_limit=5):
         while idx1 < len(inventory1) and idx2 < len(inventory2):
             if inventory1[idx1][0] == inventory2[idx2][0]:
                 if(inventory1[idx1][1] != inventory2[idx2][1]):
-                    diffs0.append("Size mismatch for '%s'." % inventory1[idx1][0])
+                    diffs0.append("Size mismatch for '%s' (oi=%s, ni=%s)." % (inventory1[idx1][0],idx1,idx2))
                 if(inventory1[idx1][2] != inventory2[idx2][2]):
-                    diffs0.append("Checksum mismatch for '%s'." % inventory1[idx1][0])
+                    diffs0.append("Checksum mismatch for '%s' (oi=%s, ni=%s)." % (inventory1[idx1][0],idx1,idx2))
                 idx1 += 1
                 idx2 += 1
             elif inventory1[idx1][0] > inventory2[idx2][0]:
-                diffs1.append("The new inventory contains an extra file '%s' (i=%s, i=%s)." % (inventory2[idx2][0],idx1,idx2))
+                diffs1.append("The new inventory contains an extra file '%s' (oi=%s, ni=%s)." % (inventory2[idx2][0],idx1,idx2))
                 idx2 += 1
             else:
-                diffs2.append("The old inventory contains an extra file '%s' (i=%s, i=%s)." % (inventory1[idx1][0],idx1,idx2))
+                diffs2.append("The old inventory contains an extra file '%s' (oi=%s, ni=%s)." % (inventory1[idx1][0],idx1,idx2))
                 idx1 += 1
 
         # notice if all of one came before all of the other
@@ -339,12 +356,12 @@ def compare_inventories(inventory1, inventory2, print_limit=5):
 
         # finish the stragglers
         while idx2 < len(inventory2):
-            diffs1.append("The new inventory contains an extra file '%s' (i=%s, i=%s)." % (inventory2[idx2][0],idx1,idx2))
+            diffs1.append("The new inventory contains an extra file '%s' (oi=%s, ni=%s)." % (inventory2[idx2][0],idx1,idx2))
             idx2 += 1
 
         # finish the stragglers
         while idx1 < len(inventory1):
-            diffs2.append("The old inventory contains an extra file '%s' (i=%s, i=%s)." % (inventory1[idx1][0],idx1,idx2))
+            diffs2.append("The old inventory contains an extra file '%s' (oi=%s, ni=%s)." % (inventory1[idx1][0],idx1,idx2))
             idx1 += 1
 
         # report while limiting spam
@@ -373,9 +390,9 @@ def compare_inventories(inventory1, inventory2, print_limit=5):
         logger.error("Exception " + str(type(err)) + " while comparing manifests.", exc_info=True)
 
     return False
-    
-    
-    
+
+
+
 def elapsed(date_one, date_two):
     """
     Give the difference in seconds between two datetime.datetime objects.
@@ -440,9 +457,9 @@ def elapsed_since(some_date, utc_date=False, db=None):
             now = now.replace(tzinfo=tz.tzlocal())         # add a time zone to our current time
 
     return elapsed(now,some_date)
-    
-    
-    
+
+
+
 def format_elapsed_seconds(elapsed, positive_ending="", negative_ending="ago"):
     """
     Format a number of elapsed seconds into something a bit nice, like "5 seconds" or "2 weeks".
@@ -527,9 +544,9 @@ def format_bytes(bytes, strict=True):
         i += 1
     f = ('%.2f' % bytes).rstrip('0').rstrip('.')
     return '%s%s %s' % (neg, f, suffixes[i])
-    
-    
-    
+
+
+
 def cleanse_bytes(some_object, non_compliance_long_notation=False, output_encoding=None, catch_exceptions=False, return_score=False):
     """
     Try to push the given object into a sensible string, were 'sensible' is by default a native python unicode (unicode python2, str python3).
@@ -631,9 +648,9 @@ def cleanse_bytes(some_object, non_compliance_long_notation=False, output_encodi
             if return_score:
                 return False, False
             return False
-    
-    
-    
+
+
+
 def read_utf8_file(file_path):
     """
     Return all text (one string, unicode) from a file which may or may not be UTF-8 and if so, might have a Byte Order Mark.
@@ -660,82 +677,110 @@ def load_json(json_file):
 
     text = read_utf8_file(json_file)
     return json.loads(text)
-    
-    
-    
-def filter_func(name):
-    if name.startswith(".") or name == args.inventory_file_name or name in ('Thumbs.db','Desktop.ini'):
-        return False
-    if not args.also_non_image_files:
-        _, ext = os.path.splitext(name.lower())
-        if ext not in ('.jpg','.jpeg','.png','.tif','.tiff','.gif','.mp4','.mov','.avi','.wmv','.mpg'):
-            logger.debug("Filter reject: %s" % name)
-            filter_summary['rejected'][ext] += 1
+
+
+
+
+def process_one_directory(d, parallel, inventory_file_name='inventory.json', also_non_image_files=False, patch=False, replace_inventory_files=False):
+    def our_filter_func(name, countas=1):
+        if name.startswith(".") or name == inventory_file_name or name in ('Thumbs.db','Desktop.ini'):
             return False
-    filter_summary['passed'][ext] += 1
-    return True
-    
-    
-    
-def processOneDirectory(d):
-    start_time = datetime.datetime.now()
-    
-    logger.info("Process %s." % d)
-    inventory = directory_inventory(d, remove_directory=True, recursive=False, filter_func=filter_func, escape_non_ascii=False)
-    
-    et = elapsed_since(start_time)
-    if et > 2:
-        etstr = format_elapsed_seconds(et)
-        size = 0
-        for name,file_size,checksum in inventory:
-            size += file_size
-        szstr = format_bytes(size)
-        logger.info("Spent %s on %s of files (%0.01f MB/sec)." % (etstr,szstr,(size/(1024.0*1024.0*et))))
-    
-    path = os.path.join(d,args.inventory_file_name)
-    if os.path.exists(path):
-        logger.info("An inventory file exists.")
-        try:
-            old_inventory = load_json(path)
-        except ValueError as err:
-            logger.warning("JSON: " + err)
-            happy = False
+        _, ext = os.path.splitext(name.lower())
+        if not (also_non_image_files or ext in ('.jpg','.jpeg','.png','.tif','.tiff','.gif','.mp4','.mov','.avi','.wmv','.mpg','cr2')):
+            logger.debug("Filter reject: %s" % name)
+            filter_summary['rejected'][ext] += countas
+            return False
+        filter_summary['passed'][ext] += countas
+        return True
+
+    try:
+        start_time = datetime.datetime.now()
+
+        logger.info("Process %s." % d)
+        inventory = directory_inventory(d, remove_directory=True, recursive=False, filter_func=our_filter_func, escape_non_ascii=False, parallel=parallel)
+        all_inventories[d] = inventory
+
+        et = elapsed_since(start_time)
+        if et > 2:
+            etstr = format_elapsed_seconds(et)
+            size = 0
+            for name,file_size,checksum in inventory:
+                size += file_size
+            szstr = format_bytes(size)
+            logger.info("Spent %s on %s of files (%0.01f MB/sec)." % (etstr,szstr,(size/(1024.0*1024.0*et))))
+
+        path = os.path.join(d,inventory_file_name)
+        if os.path.exists(path):
+            logger.info("An inventory file exists.")
+            try:
+                old_inventory = load_json(path)
+            except ValueError as err:
+                logger.warning("JSON: " + str(err))
+                happy = False
+            else:
+                old_inventory = sorted([x for x in old_inventory if our_filter_func(x[0],countas=0)], key=lambda f: f[0])  # applies the current filter to the old inventory
+                happy = compare_inventories(old_inventory,inventory)
         else:
-            old_inventory = [x for x in old_inventory if filter_func(x[0])]    # applies the current filter to the old inventory
-            happy = compare_inventories(old_inventory,inventory)
-    else:
-        happy = None
-        
-    if args.replace_inventory_files or happy is None:
-        logger.debug("An inventory file will be created.")
-        with open(path,'wb') as fh:
-            txt = json.dumps(inventory, indent=2, ensure_ascii=False)
-            fh.write(txt.encode('utf-8-sig'))
-            
-        if happy:
-            return "replaced with same"
-        elif happy is False:
-            return "replaced with fix"
+            happy = None
+
+        if replace_inventory_files or happy is None:
+            logger.debug("An inventory file will be created.")
+            with open(path,'wb') as fh:
+                txt = json.dumps(inventory, indent=2, ensure_ascii=False)
+                fh.write(txt.encode('utf-8-sig'))
+
+            if happy:
+                return True, "replaced with same"
+            elif happy is False:
+                return False, "replaced with fix"
+            else:
+                return True, "created"
+        elif happy:
+            return True, "matched"
         else:
-            return "created"
-    elif happy:
-        return "matched"
-    else:
-        return "differences"
-            
-            
-            
-def processAllSubDirectories(d, summary):
-    res = processOneDirectory(d)
-    summary[res] += 1
+            return False, "differences"
+    except Exception as err:
+        logger.error("Exception " + str(type(err)) + " while processing a directory.", exc_info=True)
+        return False, "exception"
+
+
+
+def process_all_subdirectories(d, summary, parallel, inventory_file_name, also_non_image_files, patch, replace_inventory_files):
+    happy,message = process_one_directory(d, parallel, inventory_file_name, also_non_image_files, patch, replace_inventory_files)
+    summary['counts'][message] += 1
+    if not happy:
+        summary['failed paths'].append(d)
 
     for aFile in os.listdir(d):
         fullFile = os.path.join(d, aFile)
         if os.path.isdir(fullFile):
-            processAllSubDirectories(fullFile, summary)
+            process_all_subdirectories(fullFile, summary, parallel, inventory_file_name, also_non_image_files, patch, replace_inventory_files)
 
-    
-    
+
+
+def summarize_duplicates():
+    ids_to_dirs = defaultdict(lambda: [])
+    for dir,inventory in all_inventories.items():
+        for name,size,checksum in inventory:
+            key = (size,checksum)
+            ids_to_dirs[key].append(dir)
+
+    dir_duplicate_counts = defaultdict(lambda: 0)
+    for id,dirs in ids_to_dirs.items():
+        if len(dirs) > 1:
+            for d in dirs:
+                dir_duplicate_counts[d] += 1
+
+    items = sorted(dir_duplicate_counts.items(), key=lambda x: x[1], reverse=True)
+    if items:
+        logger.info("Duplicate images per directory:")
+        for dir,count in items:
+            logger.info("  %s: %s" % (dir,count))
+    else:
+        logger.info("No exact duplicate images found.")
+
+
+
 def main():
     global args
     global logger
@@ -743,41 +788,90 @@ def main():
 
     # parse arguments
     parser = argparse.ArgumentParser(description='Create or verify an inventory for a directory.')
-    parser.add_argument('--recursive', help='make inventory files recursively, one file in each directory', action="store_true")
+    parser.add_argument('--recursive', help='make inventory files recursively, one file in each directory, otherwise only process files in a single directory', action="store_true")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--patch', help='query to approve updates to the inventory files', action="store_true")
+    group.add_argument('--replace-inventory-files', help='replace inventory files without considering their correctness', action="store_true")
     parser.add_argument('--also-non-image-files', help='include almost any file in the inventory (by default, only common image formats are included)', action="store_true")
-    parser.add_argument('--replace-inventory-files', help='replace inventory files without considering their contents', action="store_true")
     parser.add_argument('--inventory-file-name', metavar='NAME', help='the name of the inventory file, without path (default: %(default)s)', default="inventory.json")
+    parser.add_argument('--single-thread', help='process using only one thread (by default, uses one thread per CPU thread)', action="store_true")
+    parser.add_argument('--log', metavar='PATH', help='base log file name (default: %(default)s)', default="inventory.log")
     parser.add_argument('directories', metavar='DIR', nargs='+', help='list of directories to process')
     args = parser.parse_args()
-    
-    # set up a standard logger object
-    logger = setup_logger('inventory.log', console_level=logging.INFO)
 
-    # on Windows, expand special characters (on Linux, would perhaps expand previously escaped characters)
-    targets = []
-    for t in args.directories:
-        globbed = glob.glob(t)
-        targets += globbed
-    args.directories = targets
+    # set up a standard logger object
+    logger = setup_logger(args.log, console_level=logging.INFO)
 
     try:
-        filter_summary = {'rejected': defaultdict(lambda: 0),'passed': defaultdict(lambda: 0)}
-                
+        # on Windows, expand special characters (on Linux, would perhaps expand previously escaped characters)
+        targets = []
+        for t in args.directories:
+            globbed = glob.glob(t.rtrim(r'/\'))
+            targets += globbed
+        args.directories = targets
+
+        if not args.directories:
+            logger.error("No directories remain after glob-ing (remember sneaky pictures/bilder rename on Windows).")
+            logger.error("The program can not continue.")
+            exit(-1)
+
         for d in args.directories:
             if not os.path.isdir(d):
                 logger.error("The parameter '%s' is not a directory." % d)
                 logger.error("The program can not continue.")
                 exit(-1)
-                
+
+        filter_summary = {'rejected': defaultdict(lambda: 0), 'passed': defaultdict(lambda: 0)}
+
+        start_time = datetime.datetime.now()
+
         for d in args.directories:
             if args.recursive:
-                summary = defaultdict(lambda: 0)
-                processAllSubDirectories(d, summary)
-                logger.info("Summary: %s" % summary)
+                summary = {'counts': defaultdict(lambda: 0), 'failed paths': list()}
+                process_all_subdirectories(
+                    d, summary,
+                    parallel=(not args.single_thread),
+                    inventory_file_name=args.inventory_file_name,
+                    also_non_image_files=args.also_non_image_files,
+                    patch=args.patch,
+                    replace_inventory_files=args.replace_inventory_files
+                )
+
+                if summary['counts']:
+                    logger.info("Processing results (one per directory):")
+                    for kv in sorted(summary['counts'].items()):
+                        logger.info("  %s: %s" % kv)
+                if summary['failed paths']:
+                    logger.info("Paths which had problems:")
+                    for d in sorted(summary['failed paths']):
+                        logger.info("  %s" % d)
             else:
-                processOneDirectory(d)
-                
-        logger.info("Summary: %s" % filter_summary)
+                process_one_directory(
+                    d,
+                    parallel=(not args.single_thread),
+                    inventory_file_name=args.inventory_file_name,
+                    also_non_image_files=args.also_non_image_files,
+                    patch=args.patch,
+                    replace_inventory_files=args.replace_inventory_files
+                )
+
+        logger.info("Took %s to generate inventories." % format_elapsed_seconds(elapsed_since(start_time)))
+
+        summarize_duplicates()
+
+        if filter_summary['passed']:
+            logger.info("Files accepted by filter:")
+            for kv in sorted(filter_summary['passed'].items(), key=lambda x: (x[1],x[0]), reverse=True):
+                logger.info("  %s: %s" % kv)
+        else:
+            logger.info("No files processed.")
+
+        if filter_summary['rejected']:
+            logger.info("Files filtered:")
+            for kv in sorted(filter_summary['rejected'].items(), key=lambda x: (x[1],x[0]), reverse=True):
+                logger.info("  %s: %s" % kv)
+        else:
+            logger.info("No files filtered.")
     except Exception as err:
         logger.error("Exception " + str(type(err)) + " while working.", exc_info=True)
         exit(-2)
