@@ -411,26 +411,7 @@ def compare_inventories(inventory1, inventory2, print_limit=5, callback=None):
 
 
 
-def elapsed(date_one, date_two):
-    """
-    Give the difference in seconds between two datetime.datetime objects.
-    This is a workaround for missing datetime.timedelta.total_seconds() in older python (for example python 2.6.6 on Centos 6).
-
-    date_one = a datetime.datetime object or string in yyyy-mm-dd hh:mm:ss.sss format
-    date_two = a datetime.datetime object or string in yyyy-mm-dd hh:mm:ss.sss format, older than the first one
-    """
-
-    if (sys.version_info >= (3,0,0) and type(date_one) in (bytes,str)) or (sys.version_info < (3,0,0) and type(date_one) in (str,unicode)):
-        date_one = string_to_date(date_one)
-    if (sys.version_info >= (3,0,0) and type(date_two) in (bytes,str)) or (sys.version_info < (3,0,0) and type(date_two) in (str,unicode)):
-        date_two = string_to_date(date_two)
-
-    td = date_one - date_two
-    return (td.microseconds + (td.seconds + td.days * 24 * 3600) * 10**6) / 10.0**6
-
-
-
-def seconds_until(some_date, utc_date=False, db=None):
+def seconds_until(some_date, utc_date=False):
     """
     Give the number of seconds (as a float) between the current time and the given future datetime.datetime object.
 
@@ -438,14 +419,13 @@ def seconds_until(some_date, utc_date=False, db=None):
 
     some_date: a datetime.datetime object
     utc_date:  when True-ey, the given date is assumed to be in UTC time
-    db:        a database handle to be used to determine the current date (rather than using the local clock)
     """
 
-    return -1 * elapsed_since(some_date=some_date, utc_date=utc_date, db=db)
+    return -1 * elapsed_since(some_date=some_date, utc_date=utc_date)
 
 
 
-def elapsed_since(some_date, utc_date=False, db=None):
+def elapsed_since(some_date, utc_date=False):
     """
     Give the number of elapsed seconds (as a float) since the given datetime.datetime object.
 
@@ -453,19 +433,12 @@ def elapsed_since(some_date, utc_date=False, db=None):
 
     some_date: a datetime.datetime object
     utc_date:  when True-ey, the given date will be compared to the current time in UTC (no effect if the system clock is UTC)
-    db:        a database handle to be used to determine the current date (rather than using the local clock)
     """
 
     if utc_date:
-        if db:
-            now = db.selectOne("SELECT CONVERT_TZ(NOW(), @@session.time_zone, '+00:00')")
-        else:
-            now = datetime.datetime.utcnow()         # if the system clock is UTC, this is the same as datetime.now()
+        now = datetime.datetime.utcnow()         # if the system clock is UTC, this is the same as datetime.now()
     else:
-        if db:
-            now = db.selectOne("SELECT NOW()")
-        else:
-            now = datetime.datetime.now()
+        now = datetime.datetime.now()
 
     if some_date.tzinfo:
         from dateutil import tz
@@ -474,7 +447,7 @@ def elapsed_since(some_date, utc_date=False, db=None):
         else:
             now = now.replace(tzinfo=tz.tzlocal())         # add a time zone to our current time
 
-    return elapsed(now,some_date)
+    return (now - some_date).total_seconds()
 
 
 
@@ -585,10 +558,10 @@ def cleanse_bytes(some_object, non_compliance_long_notation=False, output_encodi
 
     # this list of chars is used (1) to eliminate crap we can't use anyway, and (2) pick best-fit encoding if UTF-8 decode of bytes fails
     # even native unicode strings undergo filtering before they are returned
-    blessed_unichars = set([ord(x) for x in u"ÆæØøÅåÖöÜüŃńČčĐđŊŋŠšŦŧŽž"])   # also ÏïÁá ?
+    blessed_unichars = set([ord(x) for x in u"ÆæØøÅåÖöÜü"])
 
     def printablechars(input_string):
-        is_unicode = (sys.version_info >= (3,0,0) and type(input_string) == str) or (sys.version_info < (3,0,0) and type(input_string) == unicode)
+        is_unicode = (sys.version_info >= (3,0,0) and type(input_string) == str) or (sys.version_info < (3,0,0) and type(input_string) == unicode)  # pylint: disable=undefined-variable
         is_bytes = (not is_unicode) and (sys.version_info >= (3,0,0) and type(input_string) == bytes) or (sys.version_info < (3,0,0) and type(input_string) == str)
         if not (is_unicode or is_bytes):
             raise ValueError("The given input is not a recognized string type.")
@@ -606,18 +579,18 @@ def cleanse_bytes(some_object, non_compliance_long_notation=False, output_encodi
             elif non_compliance_long_notation or not is_unicode:
                 res[idx] = noncompliant % c
             else:
-                res[idx] = chr(0xFFFD) if sys.version_info >= (3,0,0) else unichr(0xFFFD)
+                res[idx] = chr(0xFFFD) if sys.version_info >= (3,0,0) else unichr(0xFFFD)  # pylint: disable=undefined-variable
         return joiner.join(res), score
 
     def inner_func():
 
-        if (sys.version_info < (3,0,0) and type(some_object) == unicode) or (sys.version_info >= (3,0,0) and type(some_object) == str):
+        if (sys.version_info < (3,0,0) and type(some_object) == unicode) or (sys.version_info >= (3,0,0) and type(some_object) == str):  # pylint: disable=undefined-variable
             return printablechars(some_object)
 
         # things which are not a string-bytes-like object need to transform themselves into a string of some kind
         if sys.version_info < (3,0,0) and type(some_object) != str:
             inner_some_object = str(some_object)
-            if type(inner_some_object) == unicode:
+            if type(inner_some_object) == unicode:  # pylint: disable=undefined-variable
                 return printablechars(inner_some_object)
         elif sys.version_info >= (3,0,0) and type(some_object) != bytes:
             inner_some_object = str(some_object)
@@ -673,7 +646,7 @@ def read_utf8_file(file_path):
     """
     Return all text (one string, unicode) from a file which may or may not be UTF-8 and if so, might have a Byte Order Mark.
 
-    Will replace non-printable, non-ASCII, non-ÆØÅ, non-Saami characters with unicode 0xFFFD 'REPLACEMENT CHARACTER'.
+    Will replace non-printable, non-ASCII, non-ÆØÅ characters with unicode 0xFFFD 'REPLACEMENT CHARACTER'.
     """
 
     if not os.path.isfile(file_path):
@@ -690,7 +663,7 @@ def load_json(json_file):
     """
     Read a file and interpret it as JSON, strings will be unicode.  Attempt to handle various byte encodings.
 
-    Will replace non-printable, non-ASCII, non-ÆØÅ, non-Saami characters with unicode 0xFFFD 'REPLACEMENT CHARACTER'.
+    Will replace non-printable, non-ASCII, non-ÆØÅ characters with unicode 0xFFFD 'REPLACEMENT CHARACTER'.
     """
 
     text = read_utf8_file(json_file)
@@ -824,16 +797,16 @@ def compare_inventories_with_patching(old_inventory, inventory, patch=False):
 
 
 
-def process_one_directory(d, parallel, inventory_file_name='inventory.json', also_non_image_files=False, patch=False, replace_inventory_files=False):
+def process_one_directory(d):
     """
     Given a directory, create a new inventory for it and compare it to the existing inventory, if such a file exists.
     """
     
     def our_filter_func(name, countas=1):
-        if name.startswith(".") or name == inventory_file_name or name in ('Thumbs.db','Desktop.ini'):
+        if name.startswith(".") or name == args.inventory_file_name or name in ('Thumbs.db','Desktop.ini'):
             return False
         _, ext = os.path.splitext(name.lower())
-        if not (also_non_image_files or ext in all_media_files):
+        if not (args.also_non_image_files or ext in all_media_files):
             logger.debug("Filter reject: %s" % name)
             filter_summary['rejected'][ext] += countas
             return False
@@ -844,19 +817,19 @@ def process_one_directory(d, parallel, inventory_file_name='inventory.json', als
         start_time = datetime.datetime.now()
 
         logger.info("Process: %s" % d)
-        inventory = directory_inventory(d, remove_directory=True, recursive=False, filter_func=our_filter_func, escape_non_ascii=False, parallel=parallel)
+        inventory = directory_inventory(d, remove_directory=True, recursive=False, filter_func=our_filter_func, escape_non_ascii=False, parallel=(not args.single_thread))
         all_inventories[d] = inventory
 
         et = elapsed_since(start_time)
         if et > 2:
             etstr = format_elapsed_seconds(et)
             size = 0
-            for name,file_size,checksum in inventory:
+            for _, file_size, _ in inventory:
                 size += file_size
             szstr = format_bytes(size)
             logger.info("  Spent %s on %s of files (%0.01f MB/sec)." % (etstr,szstr,(size/(1024.0*1024.0*et))))
 
-        path = os.path.join(d,inventory_file_name)
+        path = os.path.join(d,args.inventory_file_name)
         revised_inventory = False
         if os.path.exists(path):
             logger.info("  An inventory file exists.")
@@ -867,12 +840,12 @@ def process_one_directory(d, parallel, inventory_file_name='inventory.json', als
                 happy = False
             else:
                 old_inventory = sorted([x for x in old_inventory if our_filter_func(x[0],countas=0)], key=lambda f: f[0])  # applies the current filter to the old inventory
-                happy, revised_inventory = compare_inventories_with_patching(old_inventory, inventory, patch)
+                happy, revised_inventory = compare_inventories_with_patching(old_inventory, inventory, args.patch)
                 if revised_inventory == inventory:
                     logger.debug("The new inventory was not revised via patching.")
                     if happy:
                         revised_inventory = False   # happy and no revisions, so don't overwrite on disk
-                elif not patch:
+                elif not args.patch:
                     raise Exception("The new inventory has been revised, but it should have remained identical.")
                 else:
                     logger.info("The new inventory has been revised via patching.")
@@ -880,14 +853,14 @@ def process_one_directory(d, parallel, inventory_file_name='inventory.json', als
         else:
             happy = None
 
-        if replace_inventory_files or revised_inventory or happy is None:
+        if args.replace_inventory_files or (revised_inventory and args.patch) or happy is None:
             logger.debug("An inventory file will be created.")
             write_json(path, inventory)
 
             if happy:
                 return True, "replaced with same"
             elif happy is False:
-                return bool(patch), "replaced with fix"
+                return bool(args.patch), "replaced with fix"
             else:
                 return True, "created"
         elif happy:
@@ -900,12 +873,12 @@ def process_one_directory(d, parallel, inventory_file_name='inventory.json', als
 
 
 
-def process_all_subdirectories(d, summary, parallel, inventory_file_name, also_non_image_files, patch, replace_inventory_files):
+def process_all_subdirectories(d, summary):
     """
     Recursively process directories, adding and/or verifying inventory files in each.
     """
 
-    happy,message = process_one_directory(d, parallel, inventory_file_name, also_non_image_files, patch, replace_inventory_files)
+    happy,message = process_one_directory(d, summary)
     summary['counts'][message] += 1
     if not happy:
         summary['failed paths'].append(d)
@@ -913,19 +886,19 @@ def process_all_subdirectories(d, summary, parallel, inventory_file_name, also_n
     for aFile in os.listdir(d):
         fullFile = os.path.join(d, aFile)
         if os.path.isdir(fullFile):
-            process_all_subdirectories(fullFile, summary, parallel, inventory_file_name, also_non_image_files, patch, replace_inventory_files)
+            process_all_subdirectories(fullFile, summary)
 
 
 
 def summarize_duplicates():
     ids_to_dirs = defaultdict(lambda: [])
     for dir,inventory in all_inventories.items():
-        for name,size,checksum in inventory:
+        for _, size, checksum in inventory:
             key = (size,checksum)
             ids_to_dirs[key].append(dir)
 
     dir_duplicate_counts = defaultdict(lambda: 0)
-    for id,dirs in ids_to_dirs.items():
+    for _, dirs in ids_to_dirs.items():
         if len(dirs) > 1:
             for d in dirs:
                 dir_duplicate_counts[d] += 1
@@ -947,7 +920,8 @@ def main():
     # parse arguments
     parser = argparse.ArgumentParser(description='Create or verify an inventory for a directory.')
     parser.add_argument('--recursive', help='make inventory files recursively, one file in each directory, otherwise only process files in a single directory', action="store_true")
-    group = parser.add_mutually_exclusive_group()
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('--create', help='create new inventories and check existing ones, but do not update any', action="store_true")
     group.add_argument('--patch', help='query to approve updates to the inventory files', action="store_true")
     group.add_argument('--replace-inventory-files', help='replace inventory files without considering their correctness', action="store_true")
     parser.add_argument('--also-non-image-files', help='include almost any file in the inventory (by default, only common image formats are included)', action="store_true")
@@ -984,14 +958,7 @@ def main():
         for d in args.directories:
             if args.recursive:
                 summary = {'counts': defaultdict(lambda: 0), 'failed paths': list()}
-                process_all_subdirectories(
-                    d, summary,
-                    parallel=(not args.single_thread),
-                    inventory_file_name=args.inventory_file_name,
-                    also_non_image_files=args.also_non_image_files,
-                    patch=args.patch,
-                    replace_inventory_files=args.replace_inventory_files
-                )
+                process_all_subdirectories(d, summary)
 
                 if summary['counts']:
                     logger.info("Processing results (one per directory):")
@@ -1002,14 +969,7 @@ def main():
                     for d in sorted(summary['failed paths']):
                         logger.info("  %s" % d)
             else:
-                process_one_directory(
-                    d,
-                    parallel=(not args.single_thread),
-                    inventory_file_name=args.inventory_file_name,
-                    also_non_image_files=args.also_non_image_files,
-                    patch=args.patch,
-                    replace_inventory_files=args.replace_inventory_files
-                )
+                process_one_directory(d)
 
         logger.info("Took %s to generate inventories." % format_elapsed_seconds(elapsed_since(start_time)))
 
