@@ -82,6 +82,7 @@ def find_dupes(inventory):
     """
 
     logger.info("Have %d files in the merged inventory." % len(inventory))
+    inventory = sorted(set(tuple(x) for x in inventory))
     to_delete = []
 
     keys_to_names = defaultdict(lambda: [])
@@ -107,8 +108,8 @@ def find_dupes(inventory):
 
     # we can calculate how many files we expect to be deleted to keep things safe
     if dupes:
-        logger.info("Files per id: %s" % ",".join(str(len(x)) for x in dupes.items()))
-        delete_count = sum([len(x)-1 for x in dupes.items()])
+        logger.info("Files per id: %s" % ",".join(str(len(x)) for x in dupes.values()))
+        delete_count = sum([len(x)-1 for x in dupes.values()])
         logger.info("We should delete %d paths." % delete_count)
         logger.info("The length of the delete list is %d items." % len(to_delete))
         assert delete_count == len(to_delete), "We don't want to delete the wrong number of things."
