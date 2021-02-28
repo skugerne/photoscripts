@@ -273,7 +273,7 @@ def make_file_id(path, calculate_checksums=True):
 
 
 
-def directory_inventory(directory, remove_directory=None, recursive=True, ignore_files=None, filter_func=None, calculate_checksums=True, escape_non_ascii=True, parallel=True):
+def directory_inventory(directory, remove_directory=None, recursive=True, ignore_files=None, filter_func=None, worker_callback=None, calculate_checksums=True, escape_non_ascii=True, parallel=True):
     """
     Produce a list of tuples (name,size,checksum) for the files in the given directory.  Name is native unicode.
 
@@ -282,6 +282,7 @@ def directory_inventory(directory, remove_directory=None, recursive=True, ignore
     recursive:            also inventory subdirectories
     ignore_files:         a list() of files or directories to be excluded from the inventory check (possibly the inventory file itself), considered independent of path
     filter_func:          when specified, must return a True-ey value for any acceptable file name to be included (path is not included)
+    worker_callback:      when specified, an extra function called from the worker thread
     calculate_checksums:  when True-ey, calculate a checksum for each file, by default sha256, with "crc32" and "md5" as valid alternatives
     escape_non_ascii:     when True-ey, replace various characters in the filenames with a (0xFF) notation, note does not escape existing (0xFF) in filenames
     """
@@ -296,7 +297,7 @@ def directory_inventory(directory, remove_directory=None, recursive=True, ignore
     files = list()
     file_lister(directory, files, recursive=recursive, ignore_files=ignore_files, filter_func=filter_func)
     if len(files) > 1 and cpu_count() > 1 and parallel:
-        pool = ThreadPool(cpu_count())
+        pool = ThreadPool(min(4,cpu_count()))   # generally python does best with a small number of threads
     else:
         pool = None
 
@@ -306,7 +307,7 @@ def directory_inventory(directory, remove_directory=None, recursive=True, ignore
             try:
                 logger.debug(u"ID file %s of %s: '%s'" % (idx+1,len(files),cleanse_bytes(aFile)))
                 (size,checksum) = make_file_id(aFile, calculate_checksums)
-                check_image(aFile)
+                if worker_callback: worker_callback(aFile, size, checksum)
                 if remove_directory:
                     if aFile.startswith(remove_directory):
                         aFile = aFile[len(remove_directory):]
@@ -870,7 +871,15 @@ def process_one_directory(d):
         start_time = datetime.datetime.now()
 
         logger.info("Process: %s" % d)
-        inventory = directory_inventory(d, remove_directory=True, recursive=False, filter_func=our_filter_func, escape_non_ascii=False, parallel=(not args.single_thread))
+        inventory = directory_inventory(
+            d,
+            remove_directory = True,
+            recursive        = False,
+            filter_func      = our_filter_func,
+            worker_callback  = lambda x,y,z: check_image(x),
+            escape_non_ascii = False,
+            parallel         = (not args.single_thread)
+        )
         all_inventories[d] = inventory
 
         et = elapsed_since(start_time)
@@ -945,6 +954,10 @@ def process_all_subdirectories(d, summary):
 
 
 def summarize_duplicates():
+    """
+    Print out a summary of duplicate images found between all directories.
+    """
+
     ids_to_dirs = defaultdict(lambda: [])
     for dir,inventory in all_inventories.items():
         for _, size, checksum in inventory:
@@ -952,14 +965,14 @@ def summarize_duplicates():
             ids_to_dirs[key].append(dir)
 
     dir_duplicate_counts = defaultdict(lambda: 0)
-    for _, dirs in ids_to_dirs.items():
-        if len(dirs) > 1:
+    for dirs in ids_to_dirs.values():
+        if len(dirs) > 1:   # the key occurred more than once (in the same dir, or a different one)
             for d in dirs:
                 dir_duplicate_counts[d] += 1
 
     items = sorted(dir_duplicate_counts.items(), key=lambda x: x[1], reverse=True)
     if items:
-        logger.info("Duplicate images per directory:")
+        logger.info("Duplicate images per directory (files in same or different dir):")
         for dir,count in items:
             logger.info("  %s: %s" % (dir,count))
     else:
@@ -978,17 +991,17 @@ def main():
     parser = argparse.ArgumentParser(description='Create or verify an inventory for a directory, optionally recursively.')
     parser.add_argument('--recursive', help='make inventory files recursively, one file in each directory, otherwise only process files in a single directory', action="store_true")
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--create', help='create new inventories and check existing ones, but do not update any', action="store_true")
+    group.add_argument('--create', help='create new inventories and check existing ones, but do not update any (except as allowed by --patch-approve-add and --patch-approve-remove)', action="store_true")
     group.add_argument('--patch', help='query to approve updates to the inventory files', action="store_true")
     group.add_argument('--replace-inventory-files', help='replace inventory files without considering their correctness', action="store_true")
-    parser.add_argument('--patch-approve-add', metavar='CSV', type=csv, help='one or more file extensions to approve adding to existing inventories')
-    parser.add_argument('--patch-approve-remove', metavar='CSV', type=csv, help='one or more file extensions to approve removing from existing inventories')
+    parser.add_argument('--patch-approve-add', metavar='CSV', type=csv, help='one or more file extensions (with leading dots, CSV list) to approve adding to existing inventories without promting, and in the --create mode')
+    parser.add_argument('--patch-approve-remove', metavar='CSV', type=csv, help='one or more file extensions (with leading dots, CSV list) to approve removing from existing inventories without promting, and in the --create mode')
     parser.add_argument('--test-load-images', help='attempt to load cetain images to see if they appear to be valid', action="store_true")
     parser.add_argument('--also-non-image-files', help='include almost any file in the inventory (by default, only common image formats are included)', action="store_true")
     parser.add_argument('--inventory-file-name', metavar='NAME', help='the name of the inventory file, without path (default: %(default)s)', default="inventory.json")
-    parser.add_argument('--single-thread', help='process using only one thread (by default, uses one thread per CPU thread)', action="store_true")
+    parser.add_argument('--single-thread', help='process using only one thread (by default, uses one thread per CPU thread, up to 4)', action="store_true")
     parser.add_argument('--log', metavar='PATH', help='base log file name (default: %(default)s)', default="inventory.log")
-    parser.add_argument('directories', metavar='DIR', nargs='+', help='list of directories to process')
+    parser.add_argument('directories', metavar='DIR', nargs='+', help='directories to process')
     args = parser.parse_args()
 
     # set up a standard logger object
@@ -1057,4 +1070,6 @@ def main():
 
 if __name__ == '__main__':
     main()
-    logger.info("Script has reached end.")
+    logger.info("Script has reached end.") # support being called as a script
+else:
+    logger = logging.getLogger(__name__)   # support being called as a library
