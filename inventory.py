@@ -324,7 +324,7 @@ def directory_inventory(directory, remove_directory=None, recursive=True, ignore
 
 def compare_inventories_inner(inventory1, inventory2, print_limit=5, callback=None):
     """
-    Compared two directory inventories, return True if they match, False otherwise.
+    Compare two directory inventories, return a tuple (identical, problematic differences).
 
     inventory1:     a result from directory_inventory(): a sorted list of (name,size,checksum) tuples for files in a directory
     inventory2:     another object similar to the first
@@ -338,28 +338,30 @@ def compare_inventories_inner(inventory1, inventory2, print_limit=5, callback=No
         diffs0 = list()   # make a list for each of three different categories of differences
         diffs1 = list()
         diffs2 = list()
+        alldiffs = 0
 
         idx1 = 0
         idx2 = 0
         while idx1 < len(inventory1) and idx2 < len(inventory2):
             if inventory1[idx1][0] == inventory2[idx2][0]:
-                issue = False
-                if(inventory1[idx1][1] != inventory2[idx2][1]):
-                    diffs0.append("Size mismatch for '%s' (oi=%s, ni=%s)." % (inventory1[idx1][0],idx1,idx2))
-                    issue = True
-                if(inventory1[idx1][2] != inventory2[idx2][2]):
-                    diffs0.append("Checksum mismatch for '%s' (oi=%s, ni=%s)." % (inventory1[idx1][0],idx1,idx2))
-                    issue = True
-                if issue and callback: callback(inventory1[idx1],inventory2[idx2])
+                if inventory1[idx1] != inventory2[idx2]:
+                    alldiffs += 1
+                    if not (callback and callback(inventory1[idx1],inventory2[idx2])):
+                        if(inventory1[idx1][1] != inventory2[idx2][1]):
+                            diffs0.append("Size mismatch for '%s' (oi=%s, ni=%s)." % (inventory1[idx1][0],idx1,idx2))
+                        elif(inventory1[idx1][2] != inventory2[idx2][2]):
+                            diffs0.append("Checksum mismatch for '%s' (oi=%s, ni=%s)." % (inventory1[idx1][0],idx1,idx2))
                 idx1 += 1
                 idx2 += 1
             elif inventory1[idx1][0] > inventory2[idx2][0]:
-                diffs1.append("The new inventory contains an extra file '%s' (oi=%s, ni=%s)." % (inventory2[idx2][0],idx1,idx2))
-                if callback: callback(None,inventory2[idx2])
+                alldiffs += 1
+                if not (callback and callback(None,inventory2[idx2])):
+                    diffs1.append("The new inventory contains an extra file '%s' (oi=%s, ni=%s)." % (inventory2[idx2][0],idx1,idx2))
                 idx2 += 1
             else:
-                diffs2.append("The old inventory contains an extra file '%s' (oi=%s, ni=%s)." % (inventory1[idx1][0],idx1,idx2))
-                if callback: callback(inventory1[idx1],None)
+                alldiffs += 1
+                if not (callback and callback(inventory1[idx1],None)):
+                    diffs2.append("The old inventory contains an extra file '%s' (oi=%s, ni=%s)." % (inventory1[idx1][0],idx1,idx2))
                 idx1 += 1
 
         # notice if all of one came before all of the other
@@ -368,14 +370,16 @@ def compare_inventories_inner(inventory1, inventory2, print_limit=5, callback=No
 
         # finish the stragglers
         while idx2 < len(inventory2):
-            diffs1.append("The new inventory contains an extra file '%s' (oi=%s, ni=%s)." % (inventory2[idx2][0],idx1,idx2))
-            if callback: callback(None,inventory2[idx2])
+            alldiffs += 1
+            if not (callback and callback(None,inventory2[idx2])):
+                diffs1.append("The new inventory contains an extra file '%s' (oi=%s, ni=%s)." % (inventory2[idx2][0],idx1,idx2))
             idx2 += 1
 
         # finish the stragglers
         while idx1 < len(inventory1):
-            diffs2.append("The old inventory contains an extra file '%s' (oi=%s, ni=%s)." % (inventory1[idx1][0],idx1,idx2))
-            if callback: callback(inventory1[idx1],None)
+            alldiffs += 1
+            if not (callback and callback(inventory1[idx1],None)):
+                diffs2.append("The old inventory contains an extra file '%s' (oi=%s, ni=%s)." % (inventory1[idx1][0],idx1,idx2))
             idx1 += 1
 
         # report while limiting spam
@@ -393,17 +397,20 @@ def compare_inventories_inner(inventory1, inventory2, print_limit=5, callback=No
         if truncated:
             logger.error("Not all differences have been logged due to a log-limit %s per type of difference." % print_limit)
 
-        counter = len(diffs0) + len(diffs1) + len(diffs2)
-        if counter > 0:
-            logger.error("The two inventories do not match (%s differences)." % counter)
-            return False
+        if alldiffs > 0:
+            if diffs0 or diffs1 or diffs2:
+                logger.error("The two inventories do not match (%s differences)." % alldiffs)
+                return False, True
+            else:
+                logger.info("The two inventories do not match (%s differences) but the changes were OK." % alldiffs)
+                return False, False
 
         logger.info("The two inventories match (checked %s files)." % len(inventory1))
-        return True
+        return True, False
     except (IndexError,KeyError) as err:
         logger.error("Exception " + str(type(err)) + " while comparing manifests.", exc_info=True)
 
-    return False
+    return False, True
 
 
 
@@ -602,7 +609,7 @@ def cleanse_bytes(some_object, non_compliance_long_notation=False, output_encodi
             utf8 = inner_some_object.decode("utf-8-sig")
             return printablechars(utf8)
 
-        except UnicodeDecodeError as err:
+        except UnicodeDecodeError:
             # cp1252 / latin-1:  used by default in the legacy components of Microsoft Windows in various places, should cover ISO-8859-1
             # cp865:             used under DOS to write Nordic languages, very similar to cp437 (original IBM PC)
             # ISO-8859-10        designed to cover the Nordic languages, including Saami
@@ -707,6 +714,9 @@ def read_stdin_yesno(q):
     """
     Prompt the user for a yes/no and return True or False.
     """
+
+    if not args.patch:
+        return False
     
     first = True
     while True:
@@ -726,55 +736,78 @@ def read_stdin_yesno(q):
 
 
 
+def is_approved(filename, extlist):
+    """
+    Determine if the given file should be forgiven for appearing or disappearing.
+    """
+
+    if not extlist:
+        return False
+    _, ext = os.path.splitext(filename.lower())
+    return bool(ext in extlist)
+
+
+
 def compare_inventories(old_inventory, inventory):
     """
     Compare two inventories, and patch the new one if appropriate.
 
     Return the a tuple including the return from compare_inventories_inner(), and the new inventory, which may have been revised.
+
+    The reason for patching the new inventory is to allow some changes to be approved, and put focus on not-approved changes.
     """
 
-    compared = []
     to_delete = []
     to_add = []
-    def comparison_callback(old_tuple, new_tuple):
-        compared.append(True)   # callback-happy way to note that we have compared something
 
-        if old_tuple and new_tuple:
-            # has been changed
-            if new_tuple[0] != old_tuple[0]:
-                raise Exception("File names do not match.  They should.")
-            logger.info("  Sizes: old %s vs new %s, Checksums: old 0x%X vs new 0x%X." % (old_tuple[1],new_tuple[1],old_tuple[2],new_tuple[2]))
-            if read_stdin_yesno("Should we update the inventory entry for file: %s" % old_tuple[0]):
-                logger.info("Suggestion accepted; Should leave the entry in the new inventory (because its values are correct).")
+    if args.patch or args.patch_approve_add or args.patch_approve_remove:
+        logger.info("Patching callback to be used.")
+        def comparison_callback(old_tuple, new_tuple):
+            if old_tuple and new_tuple:
+                # some file has been changed
+                assert new_tuple[0] == old_tuple[0], "File names are expected to match in the tuples."
+                logger.info("Sizes: old %s vs new %s, Checksums: old 0x%X vs new 0x%X." % (old_tuple[1],new_tuple[1],old_tuple[2],new_tuple[2]))
+                if read_stdin_yesno("Should we update the inventory entry for file: %s" % old_tuple[0]):
+                    logger.info("Change accepted; Should leave the entry in the new inventory.")
+                    return True
+                else:
+                    # force new inventory to contain the old stuff
+                    logger.debug("Change rejected; Should replace entry in the new inventory with the old values.")
+                    to_delete.append(new_tuple)
+                    to_add.append(old_tuple)
+            elif old_tuple:
+                # some file has gone away
+                if is_approved(old_tuple[0], args.patch_approve_remove):
+                    return True
+                if read_stdin_yesno("Should we remove the inventory entry for file: %s" % old_tuple[0]):
+                    logger.info("Change accepted; Should leave entry out of the new inventory.")
+                    return True
+                else:
+                    # force new inventory to contain the old file
+                    logger.debug("Change rejected; Should add entry to new inventory (because it should still be there).")
+                    to_add.append(old_tuple)
             else:
-                logger.info("Suggestion rejected; Should replace entry in the new inventory with the old values.")
-                to_delete.append(new_tuple)
-                to_add.append(old_tuple)
-        elif old_tuple:
-            # has gone away
-            if read_stdin_yesno("Should we remove the inventory entry for file: %s" % old_tuple[0]):
-                logger.info("Suggestion accepted; Should leave entry out of the new inventory (because it shouldn't be there).")
-            else:
-                logger.info("Suggestion rejected; Should add entry to new inventory (because it should still be there).")
-                to_add.append(old_tuple)
-        else:
-            # has been added
-            if read_stdin_yesno("Should we add an inventory entry for file: %s" % new_tuple[0]):
-                logger.info("Suggestion accepted; Should leave the entry in the new inventory (because its supposed to be there).")
-            else:
-                logger.info("Suggestion rejected; Should delete entry from the new inventory (because its not supposed to be there).")
-                to_delete.append(new_tuple)
-
-    if args.patch:
-        callback = comparison_callback
+                # some file has been added
+                if is_approved(new_tuple[0], args.patch_approve_add):
+                    return True
+                if read_stdin_yesno("Should we add an inventory entry for file: %s" % new_tuple[0]):
+                    logger.info("Change accepted; Should leave the entry in the new inventory.")
+                    return True
+                else:
+                    # force new inventory ignore the new file
+                    logger.debug("Change rejected; Should delete entry from the new inventory (because its not supposed to be there).")
+                    to_delete.append(new_tuple)
+            return False
     else:
-        callback = None
+        logger.info("Patching callback not in use.")
+        comparison_callback = None
 
     # compare
-    happy = compare_inventories_inner(old_inventory,inventory,callback=callback)
+    identical_invs, problems = compare_inventories_inner(old_inventory, inventory, callback=comparison_callback)
 
     # deal with changes approved by the callback
-    if compared:
+    # these approved changes have already theoretically been stopped from effecting 'problems'
+    if to_add or to_delete:
         inventory = inventory[:]   # copy the inventory which was provided
 
         # add and remove items from the copy as requested by the 'patch'
@@ -788,13 +821,15 @@ def compare_inventories(old_inventory, inventory):
             inventory.append(item)
         inventory = sorted(inventory, key=lambda f: f[0])
 
-    return happy, inventory
+    return identical_invs, problems, inventory
 
 
 
 def process_one_directory(d):
     """
     Given a directory, create a new inventory for it and compare it to the existing inventory, if such a file exists.
+
+    Return a tuple (happy, message).
     """
     
     def our_filter_func(name, countas=1):
@@ -823,44 +858,47 @@ def process_one_directory(d):
             for _, file_size, _ in inventory:
                 size += file_size
             szstr = format_bytes(size)
-            logger.info("  Spent %s on %s of files (%0.01f MB/sec)." % (etstr,szstr,(size/(1024.0*1024.0*et))))
+            logger.info("Spent %s on %s of files (%0.01f MB/sec)." % (etstr,szstr,(size/(1024.0*1024.0*et))))
 
         path = os.path.join(d,args.inventory_file_name)
         revised_inventory = False
         if os.path.exists(path):
-            logger.info("  An inventory file exists.")
+            logger.info("An inventory file exists.")
             try:
                 old_inventory = load_json(path)
             except ValueError as err:
                 logger.error("Failure loading old inventory, unable to compare it to the new one.")
                 logger.error("JSON: " + str(err), exc_info=True)
-                happy = False
+                identical_invs = False
+                problems = True
             else:
                 old_inventory = sorted([x for x in old_inventory if our_filter_func(x[0],countas=0)], key=lambda f: f[0])  # applies the current filter to the old inventory
-                happy, revised_inventory = compare_inventories(old_inventory, inventory)
+                identical_invs, problems, revised_inventory = compare_inventories(old_inventory, inventory)
                 if revised_inventory == inventory:
                     logger.debug("The new inventory was not revised via patching.")
-                    if happy:
-                        revised_inventory = False   # happy and no revisions, so don't overwrite on disk
-                elif not args.patch:
-                    raise Exception("The new inventory has been revised, but it should have remained identical.")
+                    if identical_invs:
+                        revised_inventory = False   # identical_invs and no revisions, so don't overwrite on disk
                 else:
+                    assert args.patch or args.patch_approve_add or args.patch_approve_remove, "Inventory should not have been revised."
                     logger.info("The new inventory has been revised via patching.")
                     inventory = revised_inventory
         else:
-            happy = None
+            identical_invs = None
+            problems = False
 
-        if happy is None or (revised_inventory and (args.replace_inventory_files or args.patch)):
-            logger.debug("An inventory file will be writen.")
+        if identical_invs is None or (revised_inventory and (args.replace_inventory_files or args.patch)):
+            logger.info("An inventory file will be writen.")
             write_json(path, inventory)
 
-            if happy is False:
-                return bool(args.patch), "replaced with fix"
+            if identical_invs is False:
+                return bool(not problems), "replaced with fix"
             else:
                 return True, "created"
-        elif happy:
+        elif identical_invs:
+            logger.info("An inventory file will not be writen because there are no differences.")
             return True, "matched"
         else:
+            logger.info("An inventory file will not be writen because there are differences, but no instruction to fix this.")
             return False, "differences"
     except Exception as err:
         logger.error("Exception " + str(type(err)) + " while processing a directory.", exc_info=True)
@@ -873,7 +911,7 @@ def process_all_subdirectories(d, summary):
     Recursively process directories, adding and/or verifying inventory files in each.
     """
 
-    happy,message = process_one_directory(d)
+    happy, message = process_one_directory(d)
     summary['counts'][message] += 1
     if not happy:
         summary['failed paths'].append(d)
@@ -912,6 +950,9 @@ def main():
     global args
     global logger
 
+    def csv(v):
+        return v.split(',')
+
     # parse arguments
     parser = argparse.ArgumentParser(description='Create or verify an inventory for a directory, optionally recursively.')
     parser.add_argument('--recursive', help='make inventory files recursively, one file in each directory, otherwise only process files in a single directory', action="store_true")
@@ -919,6 +960,8 @@ def main():
     group.add_argument('--create', help='create new inventories and check existing ones, but do not update any', action="store_true")
     group.add_argument('--patch', help='query to approve updates to the inventory files', action="store_true")
     group.add_argument('--replace-inventory-files', help='replace inventory files without considering their correctness', action="store_true")
+    parser.add_argument('--patch-approve-add', metavar='CSV', type=csv, help='one or more file extensions to approve adding to existing inventories')
+    parser.add_argument('--patch-approve-remove', metavar='CSV', type=csv, help='one or more file extensions to approve removing from existing inventories')
     parser.add_argument('--test-load-images', help='attempt to load cetain images to see if they appear to be valid', action="store_true")
     parser.add_argument('--also-non-image-files', help='include almost any file in the inventory (by default, only common image formats are included)', action="store_true")
     parser.add_argument('--inventory-file-name', metavar='NAME', help='the name of the inventory file, without path (default: %(default)s)', default="inventory.json")
@@ -965,7 +1008,8 @@ def main():
                     for d in sorted(summary['failed paths']):
                         logger.info("  %s" % d)
             else:
-                process_one_directory(d)
+                happy, message = process_one_directory(d)
+                logger.info("Processing result: happy=%s, message='%s'." % (happy,message))
 
         logger.info("Took %s to generate inventories." % format_elapsed_seconds(elapsed_since(start_time)))
 
