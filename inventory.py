@@ -27,8 +27,8 @@ args = None
 filter_summary = {'rejected': defaultdict(lambda: 0), 'passed': defaultdict(lambda: 0)}
 all_inventories = dict()
 
-all_media_files = ('.jpg','.jpeg','.png','.tif','.tiff','.gif','.mp4','.mov','.avi','.wmv','.mpg','cr2')
-checkable_image_files = ('.jpg','.jpeg')
+all_media_files = ('.jpg','.jpeg','.png','.tif','.tiff','.gif','.mp4','.mov','.avi','.wmv','.mpg','.cr2','.mp3')
+checkable_image_files = ('.jpg','.jpeg','.png')
 
 
 
@@ -798,12 +798,13 @@ def process_one_directory(d):
     """
     
     def our_filter_func(name, countas=1):
-        if name.startswith(".") or name == args.inventory_file_name or name in ('Thumbs.db','Desktop.ini'):
+        if name.startswith(".") or name == args.inventory_file_name:
             return False
         _, ext = os.path.splitext(name.lower())
         if not (args.also_non_image_files or ext in all_media_files):
             logger.debug("Filter reject: %s" % name)
-            filter_summary['rejected'][ext] += countas
+            filter_summary['rejected'][ext or '[no ext]'] += countas
+            if not ext: logger.debug("File without a name extension.")
             return False
         filter_summary['passed'][ext] += countas
         return True
@@ -831,7 +832,7 @@ def process_one_directory(d):
             try:
                 old_inventory = load_json(path)
             except ValueError as err:
-                logger.error("Failure loading old inventory., unable to compare it to the new one.")
+                logger.error("Failure loading old inventory, unable to compare it to the new one.")
                 logger.error("JSON: " + str(err), exc_info=True)
                 happy = False
             else:
@@ -849,13 +850,11 @@ def process_one_directory(d):
         else:
             happy = None
 
-        if args.replace_inventory_files or (revised_inventory and args.patch) or happy is None:
-            logger.debug("An inventory file will be created.")
+        if happy is None or (revised_inventory and (args.replace_inventory_files or args.patch)):
+            logger.debug("An inventory file will be writen.")
             write_json(path, inventory)
 
-            if happy:
-                return True, "replaced with same"
-            elif happy is False:
+            if happy is False:
                 return bool(args.patch), "replaced with fix"
             else:
                 return True, "created"
@@ -914,7 +913,7 @@ def main():
     global logger
 
     # parse arguments
-    parser = argparse.ArgumentParser(description='Create or verify an inventory for a directory.')
+    parser = argparse.ArgumentParser(description='Create or verify an inventory for a directory, optionally recursively.')
     parser.add_argument('--recursive', help='make inventory files recursively, one file in each directory, otherwise only process files in a single directory', action="store_true")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--create', help='create new inventories and check existing ones, but do not update any', action="store_true")
