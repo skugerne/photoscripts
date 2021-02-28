@@ -210,6 +210,22 @@ def file_lister(in_path, file_list, recursive=False, join_func=os.path.join, ign
             file_list.append(full_file)
 
 
+    
+def is_unicode(v):
+    """
+    Return True if the given value is native unicode, False otherwise.
+    """
+    return bool(sys.version_info >= (3,0,0) and type(v) == str) or (sys.version_info < (3,0,0) and type(v) == unicode)  # pylint: disable=undefined-variable
+
+
+
+def is_bytes(v):
+    """
+    Return True if the given value is native bytes, False otherwise.
+    """
+    return bool(sys.version_info >= (3,0,0) and type(v) == bytes) or (sys.version_info < (3,0,0) and type(v) == str)  # pylint: disable=undefined-variable
+
+
 
 def make_file_id(path, calculate_checksums=True):
     """
@@ -252,6 +268,7 @@ def make_file_id(path, calculate_checksums=True):
                 buf = fh.read(blocksize)
             checksum = hasher.hexdigest()
 
+    assert is_unicode(checksum), "The checksum should be unicode."
     return (size,checksum)
 
 
@@ -301,7 +318,7 @@ def directory_inventory(directory, remove_directory=None, recursive=True, ignore
                     aFile = aFile.replace("\\","/")       # we need to standardize the path separator so it works between platforms
                 aFile = cleanse_bytes(aFile, non_compliance_long_notation=escape_non_ascii)
 
-                checksums.append((aFile, size, checksum))
+                checksums.append([aFile, size, checksum])
             except Exception as err:
                 logger.error("Exception " + str(type(err)) + " while examining a file.", exc_info=True)
         if pool:
@@ -344,7 +361,7 @@ def compare_inventories_inner(inventory1, inventory2, print_limit=5, callback=No
         idx2 = 0
         while idx1 < len(inventory1) and idx2 < len(inventory2):
             if inventory1[idx1][0] == inventory2[idx2][0]:
-                if inventory1[idx1] != inventory2[idx2]:
+                if inventory1[idx1] != inventory2[idx2]:   # remember: tuples != lists
                     alldiffs += 1
                     if not (callback and callback(inventory1[idx1],inventory2[idx2])):
                         if(inventory1[idx1][1] != inventory2[idx2][1]):
@@ -564,12 +581,11 @@ def cleanse_bytes(some_object, non_compliance_long_notation=False, output_encodi
     blessed_unichars = set([ord(x) for x in u"ÆæØøÅåÖöÜü"])
 
     def printablechars(input_string):
-        is_unicode = (sys.version_info >= (3,0,0) and type(input_string) == str) or (sys.version_info < (3,0,0) and type(input_string) == unicode)  # pylint: disable=undefined-variable
-        is_bytes = (not is_unicode) and (sys.version_info >= (3,0,0) and type(input_string) == bytes) or (sys.version_info < (3,0,0) and type(input_string) == str)
-        if not (is_unicode or is_bytes):
+        str_is_unicode = is_unicode(input_string)
+        if not (str_is_unicode or is_bytes(input_string)):
             raise ValueError("The given input is not a recognized string type.")
 
-        if is_unicode:                     joiner = u""; noncompliant = u"(0x%02X)"
+        if str_is_unicode:                 joiner = u""; noncompliant = u"(0x%02X)"
         elif sys.version_info >= (3,0,0):  joiner = b""; noncompliant = b"(0x%02X)"
         else:                              joiner =  ""; noncompliant =  "(0x%02X)"
 
@@ -577,9 +593,9 @@ def cleanse_bytes(some_object, non_compliance_long_notation=False, output_encodi
         res = [c for c in input_string]
         for idx,c in enumerate(input_string):
             c = ord(c)
-            if c in (9,10,13) or 31 < c < 127 or (is_unicode and c in blessed_unichars):
+            if c in (9,10,13) or 31 < c < 127 or (str_is_unicode and c in blessed_unichars):
                 score += 1
-            elif non_compliance_long_notation or not is_unicode:
+            elif non_compliance_long_notation or not str_is_unicode:
                 res[idx] = noncompliant % c
             else:
                 res[idx] = chr(0xFFFD) if sys.version_info >= (3,0,0) else unichr(0xFFFD)  # pylint: disable=undefined-variable
@@ -670,7 +686,11 @@ def load_json(json_file):
     """
 
     text = read_utf8_file(json_file)
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except Exception:
+        logger.info("Got %d unicode characters." % len(text))
+        raise
 
 
 
@@ -715,9 +735,6 @@ def read_stdin_yesno(q):
     Prompt the user for a yes/no and return True or False.
     """
 
-    if not args.patch:
-        return False
-    
     first = True
     while True:
         if first:
@@ -761,45 +778,50 @@ def compare_inventories(old_inventory, inventory):
     to_add = []
 
     if args.patch or args.patch_approve_add or args.patch_approve_remove:
-        logger.info("Patching callback to be used.")
+        logger.debug("Patching callback to be used.")
         def comparison_callback(old_tuple, new_tuple):
             if old_tuple and new_tuple:
                 # some file has been changed
                 assert new_tuple[0] == old_tuple[0], "File names are expected to match in the tuples."
-                logger.info("Sizes: old %s vs new %s, Checksums: old 0x%X vs new 0x%X." % (old_tuple[1],new_tuple[1],old_tuple[2],new_tuple[2]))
-                if read_stdin_yesno("Should we update the inventory entry for file: %s" % old_tuple[0]):
-                    logger.info("Change accepted; Should leave the entry in the new inventory.")
-                    return True
-                else:
-                    # force new inventory to contain the old stuff
-                    logger.debug("Change rejected; Should replace entry in the new inventory with the old values.")
-                    to_delete.append(new_tuple)
-                    to_add.append(old_tuple)
+                assert is_unicode(new_tuple[0]) and is_unicode(old_tuple[0]), "File names should be unicode."
+                assert is_unicode(new_tuple[2]) and is_unicode(old_tuple[2]), "Checksums should be unicode."
+                if args.patch:
+                    logger.info("Sizes: old %d vs new %d, Checksums: old %s vs new %s." % (old_tuple[1],new_tuple[1],old_tuple[2],new_tuple[2]))
+                    if read_stdin_yesno("Should we update the inventory entry for file: %s" % old_tuple[0]):
+                        logger.info("Change accepted; Should leave the entry in the new inventory.")
+                        return True
+                    else:
+                        # force new inventory to contain the old stuff
+                        logger.debug("Change rejected; Should replace entry in the new inventory with the old values.")
+                        to_delete.append(new_tuple)
+                        to_add.append(old_tuple)
             elif old_tuple:
                 # some file has gone away
                 if is_approved(old_tuple[0], args.patch_approve_remove):
                     return True
-                if read_stdin_yesno("Should we remove the inventory entry for file: %s" % old_tuple[0]):
-                    logger.info("Change accepted; Should leave entry out of the new inventory.")
-                    return True
-                else:
-                    # force new inventory to contain the old file
-                    logger.debug("Change rejected; Should add entry to new inventory (because it should still be there).")
-                    to_add.append(old_tuple)
+                if args.patch:
+                    if read_stdin_yesno("Should we remove the inventory entry for file: %s" % old_tuple[0]):
+                        logger.info("Change accepted; Should leave entry out of the new inventory.")
+                        return True
+                    else:
+                        # force new inventory to contain the old file
+                        logger.debug("Change rejected; Should add entry to new inventory (because it should still be there).")
+                        to_add.append(old_tuple)
             else:
                 # some file has been added
                 if is_approved(new_tuple[0], args.patch_approve_add):
                     return True
-                if read_stdin_yesno("Should we add an inventory entry for file: %s" % new_tuple[0]):
-                    logger.info("Change accepted; Should leave the entry in the new inventory.")
-                    return True
-                else:
-                    # force new inventory ignore the new file
-                    logger.debug("Change rejected; Should delete entry from the new inventory (because its not supposed to be there).")
-                    to_delete.append(new_tuple)
+                if args.patch:
+                    if read_stdin_yesno("Should we add an inventory entry for file: %s" % new_tuple[0]):
+                        logger.info("Change accepted; Should leave the entry in the new inventory.")
+                        return True
+                    else:
+                        # force new inventory to not include the new file (just like the old inventory)
+                        logger.debug("Change rejected; Should delete entry from the new inventory (because its not supposed to be there).")
+                        to_delete.append(new_tuple)
             return False
     else:
-        logger.info("Patching callback not in use.")
+        logger.debug("Patching callback not in use.")
         comparison_callback = None
 
     # compare
@@ -862,7 +884,7 @@ def process_one_directory(d):
 
         path = os.path.join(d,args.inventory_file_name)
         revised_inventory = False
-        if os.path.exists(path):
+        if os.path.exists(path) and not args.replace_inventory_files:
             logger.info("An inventory file exists.")
             try:
                 old_inventory = load_json(path)
@@ -879,14 +901,13 @@ def process_one_directory(d):
                     if identical_invs:
                         revised_inventory = False   # identical_invs and no revisions, so don't overwrite on disk
                 else:
-                    assert args.patch or args.patch_approve_add or args.patch_approve_remove, "Inventory should not have been revised."
-                    logger.info("The new inventory has been revised via patching.")
+                    logger.debug("The new inventory has been revised via patching.")
                     inventory = revised_inventory
         else:
             identical_invs = None
             problems = False
 
-        if identical_invs is None or (revised_inventory and (args.replace_inventory_files or args.patch)):
+        if identical_invs is None or (revised_inventory and (args.patch or not problems)):
             logger.info("An inventory file will be writen.")
             write_json(path, inventory)
 
@@ -895,10 +916,10 @@ def process_one_directory(d):
             else:
                 return True, "created"
         elif identical_invs:
-            logger.info("An inventory file will not be writen because there are no differences.")
+            logger.debug("An inventory file will not be writen because there are no differences.")
             return True, "matched"
         else:
-            logger.info("An inventory file will not be writen because there are differences, but no instruction to fix this.")
+            logger.debug("An inventory file will not be writen because there are differences, but no instruction to fix this.")
             return False, "differences"
     except Exception as err:
         logger.error("Exception " + str(type(err)) + " while processing a directory.", exc_info=True)
