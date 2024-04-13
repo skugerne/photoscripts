@@ -1,17 +1,16 @@
 # -*- encoding: UTF-8 -*-
 
 '''
-Handle certain situations where images are duplicated under different names.
+Help cleanup (or understanding) in situations where images are duplicated under different names.
 '''
 
 import os
 import re
-import datetime
 import argparse
 import glob
 import logging
 from collections import defaultdict
-from inventory import setup_logger, directory_inventory, all_media_files, elapsed_since, format_bytes, format_elapsed_seconds
+from inventory import setup_logger, load_json
 
 
 
@@ -21,45 +20,32 @@ args = None
 
 
 
-def process_one_dir(path, filter_summary):
+def process_one_dir(path, directory_summary):
     """
-    Return an inventory for the given path.
+    Return inventory contents for the given path, if there is an inventory file.
     """
 
-    def our_filter_func(name, countas=1):
-        if name.startswith(".") or name == args.inventory_file_name:
-            return False
-        _, ext = os.path.splitext(name.lower())
-        if not (args.also_non_image_files or ext in all_media_files):
-            logger.debug("Filter reject: %s" % name)
-            filter_summary['rejected'][ext or '[no ext]'] += countas
-            if not ext: logger.debug("File without a name extension.")
-            return False
-        filter_summary['passed'][ext] += countas
-        return True
+    logger.info("Process path: %s" % path)
 
-    start_time = datetime.datetime.now()
+    invpath = os.path.join(path,args.inventory_file_name)
+    try:
+        if os.path.exists(invpath) and os.path.isfile(invpath):
+            contents = load_json(invpath)
+            directory_summary['count'] += 1
+            directory_summary['inventories'].append(path)
+    except OSError as err:
+        logger.warning("Failed to read an inventory file.")
+        logger.debug(err,exc_info=True)
+        directory_summary['errors'] += 1
+        contents = []
 
-    logger.info("Processing path '%s'." % path)
-    inventory = directory_inventory(
-        path,
-        remove_directory = False,
-        recursive        = args.recursive,
-        filter_func      = our_filter_func,
-        escape_non_ascii = False,
-        parallel         = (not args.single_thread)
-    )
+    if args.recursive:
+        for thing in os.listdir(path):
+            thing = os.path.join(path, thing)
+            if os.path.isdir(thing):
+                contents += process_one_dir(thing, directory_summary)
 
-    et = elapsed_since(start_time)
-    if et > 2:
-        etstr = format_elapsed_seconds(et)
-        size = 0
-        for _, file_size, _ in inventory:
-            size += file_size
-        szstr = format_bytes(size)
-        logger.info("Spent %s on %s of files (%0.01f MB/sec)." % (etstr,szstr,(size/(1024.0*1024.0*et))))
-
-    return inventory
+    return contents
 
 
 
@@ -78,7 +64,7 @@ def filename_score(path):
 
 def find_dupes(inventory):
     """
-    Example the mega-inventory and find duplicates within it.
+    Examine the merged inventories (one or more lists concatinated into one) and find duplicates within it.
     """
 
     logger.info("Have %d files in the merged inventory." % len(inventory))
@@ -103,16 +89,19 @@ def find_dupes(inventory):
             logger.info("Overlapping paths (with unclear best choice):")
         for idx,p in enumerate(paths):
             logger.info("  %s (score %d)" % (p,scores[idx]))
-            if scores[idx] < maxscore and count == 1:
+            if scores[idx] < maxscore:
                 to_delete.append(p)
 
     # we can calculate how many files we expect to be deleted to keep things safe
     if dupes:
         logger.info("Files per id: %s" % ",".join(str(len(x)) for x in dupes.values()))
-        delete_count = sum([len(x)-1 for x in dupes.values()])
+        delete_count = sum([len(x)-1 for x in dupes.values()])      # leave one file per dupe list
         logger.info("We should delete %d paths." % delete_count)
         logger.info("The length of the delete list is %d items." % len(to_delete))
-        assert delete_count == len(to_delete), "We don't want to delete the wrong number of things."
+        if delete_count != len(to_delete):
+            logger.error("The number of files to delete does not pass our sanity check.")
+            logger.info("One cause of such a mismatch can be duplicates without one clear file to keep.")
+            return
     else:
         logger.info("No dupes to report on.")
 
@@ -131,12 +120,10 @@ def main():
     global logger
 
     # parse arguments
-    parser = argparse.ArgumentParser(description='Examine the files in the given directories and print commands that could clean up duplicates.')
+    parser = argparse.ArgumentParser(description='Examine existing inventory files, find duplicates inside them, and output a list of commands to remove duplicates.')
     parser.add_argument('--recursive', help='crawl all subpaths inside the given paths', action="store_true")
-    parser.add_argument('--also-non-image-files', help='include almost any file in the inventory (by default, only common image formats are included)', action="store_true")
-    parser.add_argument('--single-thread', help='process using only one thread (by default, uses one thread per CPU thread, up to 4)', action="store_true")
     parser.add_argument('--delete-command-file', metavar='NAME', help='a file to write a list of delete commands to (default: %(default)s)', default="deleteme.txt")
-    parser.add_argument('--inventory-file-name', metavar='NAME', help='the name of the inventory file, in this script used only as a file to ignore when building inventories (default: %(default)s)', default="inventory.json")
+    parser.add_argument('--inventory-file-name', metavar='NAME', help='the name of the inventory file to look for in each directory (default: %(default)s)', default="inventory.json")
     parser.add_argument('--log', metavar='PATH', help='base log file name (default: %(default)s)', default="dedupe.log")
     parser.add_argument('directories', metavar='DIR', nargs='+', help='directories to process')
     args = parser.parse_args()
@@ -163,25 +150,13 @@ def main():
                 logger.error("The program can not continue.")
                 exit(-1)
 
-        filter_summary = {'rejected': defaultdict(lambda: 0), 'passed': defaultdict(lambda: 0)}
-        inventory = []
+        directory_summary = {'count': 0, 'inventories': [], 'errors': 0}
+        merged_inventory = []
         for d in args.directories:
-            inventory += process_one_dir(d, filter_summary)
-        find_dupes(inventory)
-
-        if filter_summary['passed']:
-            logger.info("Files accepted by filter:")
-            for kv in sorted(filter_summary['passed'].items(), key=lambda x: (x[1],x[0]), reverse=True):
-                logger.info("  %s: %s" % kv)
-        else:
-            logger.info("No files processed.")
-
-        if filter_summary['rejected']:
-            logger.info("Files filtered:")
-            for kv in sorted(filter_summary['rejected'].items(), key=lambda x: (x[1],x[0]), reverse=True):
-                logger.info("  %s: %s" % kv)
-        else:
-            logger.info("No files filtered.")
+            merged_inventory += process_one_dir(d, directory_summary)
+        logger.info("Found %d inventory files containing %d records." % (directory_summary['count'],len(merged_inventory)))
+        logger.info("Encountered %d errors loading inventories." % directory_summary['errors'])
+        find_dupes(merged_inventory)
 
     except Exception as err:
         logger.error("Exception " + str(type(err)) + " while working.", exc_info=True)
