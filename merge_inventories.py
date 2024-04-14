@@ -2,6 +2,8 @@
 
 '''
 Create one large inventory from small ones which are distributed in the various image directories.
+
+This script is therefore intended to be run after inventory.py has gone around making the per-directory inventory files.
 '''
 
 import os
@@ -25,6 +27,7 @@ def process_one_dir(path, directory_summary):
 
     logger.info("Process path: %s" % path)
 
+    contents = []
     invpath = os.path.join(path,args.inventory_file_name)
     try:
         if os.path.exists(invpath) and os.path.isfile(invpath):
@@ -42,7 +45,6 @@ def process_one_dir(path, directory_summary):
         logger.warning("Failed to read an inventory file.")
         logger.debug(err,exc_info=True)
         directory_summary['errors'] += 1
-        contents = []
 
     if args.recursive:
         for thing in os.listdir(path):
@@ -51,6 +53,7 @@ def process_one_dir(path, directory_summary):
                 contents += process_one_dir(thing, directory_summary)
 
     return contents
+
 
 
 def main():
