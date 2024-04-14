@@ -871,6 +871,11 @@ def process_one_directory(d):
         start_time = datetime.datetime.now()
 
         logger.info("Process: %s" % d)
+
+        invpath = os.path.join(d,args.inventory_file_name)
+        if os.path.exists(invpath) and args.create_only:
+            return True, "skipped"
+        
         inventory = directory_inventory(
             d,
             remove_directory = True,
@@ -891,12 +896,11 @@ def process_one_directory(d):
             szstr = format_bytes(size)
             logger.info("Spent %s on %s of files (%0.01f MB/sec)." % (etstr,szstr,(size/(1024.0*1024.0*et))))
 
-        path = os.path.join(d,args.inventory_file_name)
         revised_inventory = False
-        if os.path.exists(path) and not args.replace_inventory_files:
+        if os.path.exists(invpath) and not args.replace_inventory_files:
             logger.info("An inventory file exists.")
             try:
-                old_inventory = load_json(path)
+                old_inventory = load_json(invpath)
             except ValueError as err:
                 logger.error("Failure loading old inventory, unable to compare it to the new one.")
                 logger.error("JSON: " + str(err), exc_info=True)
@@ -921,7 +925,7 @@ def process_one_directory(d):
 
         if identical_invs is None or (revised_inventory and (args.patch or not problems)):
             logger.info("An inventory file will be writen.")
-            write_json(path, inventory)
+            write_json(invpath, inventory)
 
             if identical_invs is False:
                 return bool(not problems), "replaced with fix"
@@ -994,11 +998,12 @@ def main():
     parser = argparse.ArgumentParser(description='Create or verify an inventory for a directory, optionally recursively.')
     parser.add_argument('--recursive', help='make inventory files recursively, one file in each directory, otherwise only process files in a single directory', action="store_true")
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--create', help='create new inventories and check existing ones, but do not update any (except as allowed by --patch-approve-add and --patch-approve-remove) (note there is no option to not create missing inventories)', action="store_true")
+    group.add_argument('--create-and-check', help='create new inventories and check existing ones, but do not update any (except as allowed by --patch-approve-add and --patch-approve-remove)', action="store_true")
+    group.add_argument('--create-only', help='create new inventories but do nothing for directories that lack them (note there is no option to not create missing inventories)', action="store_true")
     group.add_argument('--patch', help='query to approve updates to the inventory files', action="store_true")
     group.add_argument('--replace-inventory-files', help='replace inventory files without considering their correctness', action="store_true")
-    parser.add_argument('--patch-approve-add', metavar='CSV', type=csv, help='one or more file extensions (with leading dots, CSV list, case-insensitive) to approve adding to existing inventories without promting, valid in the --patch and --create modes')
-    parser.add_argument('--patch-approve-remove', metavar='CSV', type=csv, help='one or more file extensions (with leading dots, CSV list, case-insensitive) to approve removing from existing inventories without promting, valid in the --patch and --create modes')
+    parser.add_argument('--patch-approve-add', metavar='CSV', type=csv, help='one or more file extensions (with leading dots, CSV list, case-insensitive) to approve adding to existing inventories without promting, valid in the --patch and ---create-and-check modes')
+    parser.add_argument('--patch-approve-remove', metavar='CSV', type=csv, help='one or more file extensions (with leading dots, CSV list, case-insensitive) to approve removing from existing inventories without promting, valid in the --patch and --create-and-check modes')
     parser.add_argument('--test-load-images', help='attempt to load cetain images to see if they appear to be valid', action="store_true")
     parser.add_argument('--also-non-image-files', help='include almost any file in the inventory (by default, only common image formats are included)', action="store_true")
     parser.add_argument('--inventory-file-name', metavar='NAME', help='the name of the per-directory inventory file, without path (default: %(default)s)', default="inventory.json")
@@ -1011,6 +1016,11 @@ def main():
     logger = setup_logger(args.log, console_level=logging.INFO)
 
     try:
+        if (args.patch_approve_add or args.patch_approve_remove) and not (args.create_and_check or args.patch):
+            logger.error("Can only use --patch-approve-add and/or --patch-approve-remove with --create-and-check or --patch.")
+            logger.error("The program can not continue.")
+            exit(-1)
+
         # on Windows, expand special characters (on Linux, would perhaps expand previously escaped characters)
         targets = []
         for t in args.directories:
