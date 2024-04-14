@@ -21,6 +21,7 @@ from inventory import setup_logger, load_json
 # globals
 logger = None
 args = None
+delete_dir_tracking = defaultdict(lambda: {'total': 0, 'todelete': 0})
 
 
 
@@ -36,6 +37,7 @@ def process_one_dir(path, directory_summary):
 
     logger.info("Process path: %s" % path)
 
+    contents = []
     invpath = os.path.join(path,args.inventory_file_name)
     try:
         if os.path.exists(invpath) and os.path.isfile(invpath):
@@ -44,13 +46,13 @@ def process_one_dir(path, directory_summary):
                 name,size,checksum = contents[idx]
                 name = os.path.join(path,name)           # enhance the file paths with the directory
                 contents[idx] = name,size,checksum
+            delete_dir_tracking[path]['total'] = len(contents)
             directory_summary['count'] += 1
             directory_summary['inventories'].append(path)
     except OSError as err:
         logger.warning("Failed to read an inventory file.")
         logger.debug(err,exc_info=True)
         directory_summary['errors'] += 1
-        contents = []
 
     if args.recursive:
         for thing in os.listdir(path):
@@ -62,12 +64,11 @@ def process_one_dir(path, directory_summary):
 
 
 
-def filename_score(path):
+def filename_score(dir, path):
     """
-    Determine how interesting the given file name is.  (There are sometimes versions with merely different caps.)
+    Determine how interesting the given file is.
     """
 
-    dir, path = os.path.split(path)
     if args.bad_dirs and dir in args.bad_dirs: return 0
     if re.match(r"^(img|mvi)_\d+\.(jpg|avi)$",path): return 1
     if re.match(r"^(IMG|MVI)_\d+\.(JPG|AVI)$",path): return 2
@@ -94,18 +95,20 @@ def find_dupes(inventory):
     logger.info("Have %d distinct files, %d duped files." % (len(keys_to_names),len(dupes)))
 
     for key,paths in dupes.items():
-        scores = [filename_score(p) for p in paths]
+        dirs_and_paths = [os.path.split(p) for p in paths]
+        scores = [filename_score(d,p) for d,p in dirs_and_paths]
         maxscore = max(scores)
         count = sum([1 for x in scores if x == maxscore])
         if count == 1:
             logger.info("Overlapping paths (with one superior choice):")
         else:
             logger.warning("Overlapping paths (with unclear best choice):")
-        for idx,p in enumerate(paths):
-            logger.info("  %s (score %d)" % (p,scores[idx]))
+        for idx in range(len(paths)):
+            logger.info("  %s (score %d)" % (paths[idx],scores[idx]))
             if scores[idx] < maxscore:
-                to_delete.append(p)
-
+                delete_dir_tracking[dirs_and_paths[idx][0]]['todelete'] += 1
+                to_delete.append(paths[idx])
+                
     # we can calculate how many files we expect to be deleted to keep things safe
     if dupes:
         logger.info("Files per id: %s" % ",".join(str(len(x)) for x in dupes.values()))
@@ -114,7 +117,7 @@ def find_dupes(inventory):
         logger.info("The length of the delete list is %d items." % len(to_delete))
         if delete_count != len(to_delete):
             logger.error("The number of files to delete does not pass our sanity check.")
-            logger.info("One cause of such a mismatch can be duplicates without one clear file to keep.")
+            logger.info("(One cause of such a mismatch can be duplicates without one clear file to keep.)")
             return
     else:
         logger.info("No dupes to report on.")
@@ -184,6 +187,10 @@ def main():
             logger.error(err)
             logger.error("The program can not continue.")
             exit(-1)
+
+        for k,v in delete_dir_tracking.items():
+            if v['todelete'] or (args.bad_dirs and k in args.bad_dirs):
+                logger.info("%s: delete %d of %d" % (k,v['todelete'],v['total']))
 
     except Exception as err:
         logger.error("Exception " + str(type(err)) + " while working.", exc_info=True)
