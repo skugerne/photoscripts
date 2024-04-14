@@ -912,7 +912,10 @@ def process_one_directory(d):
                 else:
                     logger.debug("The new inventory has been revised via patching.")
                     inventory = revised_inventory
+
+            assert identical_invs in (True,False)
         else:
+            # inventory did not exist, or we don't care to look for it (--replace-inventory-files)
             identical_invs = None
             problems = False
 
@@ -985,20 +988,20 @@ def main():
     global logger
 
     def csv(v):
-        return v.split(',')
+        return v.lower().split(',')
 
     # parse arguments
     parser = argparse.ArgumentParser(description='Create or verify an inventory for a directory, optionally recursively.')
     parser.add_argument('--recursive', help='make inventory files recursively, one file in each directory, otherwise only process files in a single directory', action="store_true")
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--create', help='create new inventories and check existing ones, but do not update any (except as allowed by --patch-approve-add and --patch-approve-remove)', action="store_true")
+    group.add_argument('--create', help='create new inventories and check existing ones, but do not update any (except as allowed by --patch-approve-add and --patch-approve-remove) (note there is no option to not create missing inventories)', action="store_true")
     group.add_argument('--patch', help='query to approve updates to the inventory files', action="store_true")
     group.add_argument('--replace-inventory-files', help='replace inventory files without considering their correctness', action="store_true")
-    parser.add_argument('--patch-approve-add', metavar='CSV', type=csv, help='one or more file extensions (with leading dots, CSV list) to approve adding to existing inventories without promting, and in the --create mode')
-    parser.add_argument('--patch-approve-remove', metavar='CSV', type=csv, help='one or more file extensions (with leading dots, CSV list) to approve removing from existing inventories without promting, and in the --create mode')
+    parser.add_argument('--patch-approve-add', metavar='CSV', type=csv, help='one or more file extensions (with leading dots, CSV list, case-insensitive) to approve adding to existing inventories without promting, valid in the --patch and --create modes')
+    parser.add_argument('--patch-approve-remove', metavar='CSV', type=csv, help='one or more file extensions (with leading dots, CSV list, case-insensitive) to approve removing from existing inventories without promting, valid in the --patch and --create modes')
     parser.add_argument('--test-load-images', help='attempt to load cetain images to see if they appear to be valid', action="store_true")
     parser.add_argument('--also-non-image-files', help='include almost any file in the inventory (by default, only common image formats are included)', action="store_true")
-    parser.add_argument('--inventory-file-name', metavar='NAME', help='the name of the inventory file, without path (default: %(default)s)', default="inventory.json")
+    parser.add_argument('--inventory-file-name', metavar='NAME', help='the name of the per-directory inventory file, without path (default: %(default)s)', default="inventory.json")
     parser.add_argument('--single-thread', help='process using only one thread (by default, uses one thread per CPU thread, up to 4)', action="store_true")
     parser.add_argument('--log', metavar='PATH', help='base log file name (default: %(default)s)', default="inventory.log")
     parser.add_argument('directories', metavar='DIR', nargs='+', help='directories to process')
@@ -1016,7 +1019,7 @@ def main():
         args.directories = targets
 
         if not args.directories:
-            logger.error("No directories remain after glob-ing (remember sneaky pictures/bilder rename on Windows).")
+            logger.error("No directories remain after glob-ing (remember sneaky pictures/bilder folder rename on Windows).")
             logger.error("The program can not continue.")
             exit(-1)
 
@@ -1025,6 +1028,11 @@ def main():
                 logger.error("The parameter '%s' is not a directory." % d)
                 logger.error("The program can not continue.")
                 exit(-1)
+
+        if args.replace_inventory_files and (args.patch_approve_add or args.patch_approve_remove):
+            logger.error("Not allowed to combine --replace-inventory-files with --patch-approve-add or --patch-approve-remove.")
+            logger.error("The program can not continue.")
+            exit(-1)
 
         start_time = datetime.datetime.now()
 
