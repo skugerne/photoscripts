@@ -8,11 +8,11 @@ import os
 import argparse
 import glob, re
 import logging
-import datetime
 from collections import defaultdict
 import pygame_sdl2 as pygame
 import piexif
-from PIL import Image, JpegImagePlugin
+from PIL import Image
+from random import choice
 from inventory import setup_logger, load_json, write_json
 
 
@@ -24,14 +24,21 @@ args = None
 
 
 def parsedate(datestr):
-	# Have observed that with dateutil.parser.parse(datestr):
-	#   b'2019:07:26 14:15:58' => 2019-08-02 14:15:58
-	#   '20190726 141558' => 2019-08-02 14:15:58
-	# Therefore implemented a parser using regex so that things are reliably strict.
-	m = re.match("^(\d\d\d\d):(\d\d):(\d\d) (\d\d):(\d\d):(\d\d)$",datestr.decode('ascii'))
-	if not m:
-		raise Exception("Failed to parse: %s" % datestr)
-	return datetime.datetime(*[int(m.group(x+1)) for x in range(6)])
+    """
+    Parse a date string (as raw bytes) into a tuple.
+    """
+
+    if not datestr:
+        return None
+    
+    # ex: b'2005-06-27T09:56:05-04:00'
+    # ex: b'2006:05:22 19:17:28\x00'
+    m = re.match(rb"^(\d\d\d\d)[:-](\d\d)[:-](\d\d)[T ](\d\d):(\d\d):(\d\d)(\000|[+-]\d\d:\d\d)?$",datestr)
+    if not m:
+        logger.warning("Failed to parse: %s" % datestr)
+        return None
+    
+    return tuple(int(m.group(x+1)) for x in range(6))
 
 
 
@@ -49,48 +56,46 @@ def load_database():
             logger.warning("The directories in the database do not match the parameters, building new database.")
             return None
         
-        for idx, in range(len(contents['images'])):
-            dt,path = contents['images'][idx]
-            dt = parsedate(dt)
-            contents['images'][idx] = dt,path
+        if not contents['images']:
+            logger.warning("The database constains no images, building new database.")
+            return None
         
+        return contents
     except Exception as err:
         logger.error("Failed to load: %s" % args.database_name)
         logger.debug(err, exc_info=True)
         return None
+
+
+
+def get_props_for_image(path):
+    """
+    Find a date and image dimentions in the image EXIF data.
     
-
-
-def write_database(contents):
-    """
-    Write the database data to disk so we don't need to build it next time.
-    """
-        
-    for idx, in range(len(contents['images'])):
-        dt,path = contents['images'][idx]
-        dt = dt.strftime('%Y:%m:%d %H:%M:%S')
-        contents['images'][idx] = dt,path
-
-    write_json(args.database_name, contents)
-
-
-
-def get_date_for_image(path):
-    """
-    Find a date in the image EXIF data.
+    Return a tuple of (the date as a 6-element tuple), (pixel count).
     """
 
     with Image.open(path) as imgobj:
         if 'exif' in imgobj.info:
             exif_dict = piexif.load(imgobj.info['exif'])
         else:
-            logger.warning("Failed to read exif: %s" + path)
-            return None
+            logger.warning("Failed to read exif: %s" % path)
+            return None,None
         
-        dt = parsedate(exif_dict["0th"][piexif.ImageIFD.DateTime])
-        dt = dt or parsedate(exif_dict["Exif"][piexif.ExifIFD.DateTimeOriginal])
-        dt = dt or parsedate(exif_dict["Exif"][piexif.ExifIFD.DateTimeDigitized])
-        return dt or None
+        try:
+            dt = parsedate(exif_dict["0th"].get(piexif.ImageIFD.DateTime))
+            dt = dt or parsedate(exif_dict["Exif"].get(piexif.ExifIFD.DateTimeOriginal))
+            dt = dt or parsedate(exif_dict["Exif"].get(piexif.ExifIFD.DateTimeDigitized))
+            dt = dt or None
+
+            x = exif_dict["0th"].get(piexif.ImageIFD.ImageWidth) or exif_dict["Exif"].get(piexif.ExifIFD.PixelXDimension) or 0
+            y = exif_dict["0th"].get(piexif.ImageIFD.ImageLength) or exif_dict["Exif"].get(piexif.ExifIFD.PixelYDimension) or 0
+            sz = x * y or None
+
+            return dt,sz
+        except KeyError:
+            logger.warning("Failed to read exif (missing key): %s" % path)
+            return None,None
 
 
 
@@ -108,30 +113,41 @@ def process_one_dir(path, directory_summary):
             filtered_contents = []
             directory_summary['count'] += 1
             directory_summary['inventories'].append(path)
-            for name,_,_ in range(len(contents)):
+            for name,_,_ in contents:                  # ignore checksum and byte-size from the inventory file
                 name = os.path.join(path,name)
-                if name.lower.endswith(".jpg"):
-                    dt = get_date_for_image(path)
-                    if dt:
+                if name.lower().endswith(".jpg"):      # only jpg images
+                    dt,sz = get_props_for_image(name)
+                    if dt and sz and sz > 1600*1200:   # only images with date, size metadata, and of a certain min resolution
                         filtered_contents.append((dt,name))
     except OSError as err:
         logger.warning("Failed to read an inventory file.")
         logger.debug(err,exc_info=True)
         directory_summary['errors'] += 1
-        contents = []
+        filtered_contents = []
 
     if args.recursive:
         for thing in os.listdir(path):
             thing = os.path.join(path, thing)
             if os.path.isdir(thing):
-                contents += process_one_dir(thing, directory_summary)
+                filtered_contents += process_one_dir(thing, directory_summary)
 
-    return contents
+    return filtered_contents
 
 
 
 def start_show(database_content):
     logger.info("Start.")
+
+    grouped = defaultdict(lambda: defaultdict(lambda: []))
+    for dt,path in database_content['images']:
+        grouped[dt[0]][dt[1]].append(path)  # year, month
+
+    paths = []
+    for year in sorted(grouped.keys()):
+        for month in sorted(grouped[year].keys()):
+            paths.append(choice(grouped[year][month]))
+
+    logger.info("Lets show: %s" % str(paths))
 
 
 
@@ -142,7 +158,7 @@ def main():
     # parse arguments
     parser = argparse.ArgumentParser(description='Make a semi-random slideshow from one or more directories or directory trees.')
     parser.add_argument('--recursive', help='crawl all subpaths inside the given paths', action="store_true")
-    parser.add_argument('--refresh-database', help='rebuild the database file from inventory files', action="store_true")
+    parser.add_argument('--refresh-database', help='rebuild the database file from inventory files (rebuild is automatic if the database is empty or is based on different base paths)', action="store_true")
     parser.add_argument('--database-name', metavar='NAME', help='the name of a file to serve as a database of images to consider showing (default: %(default)s)', default="slideshow-db.json")
     parser.add_argument('--inventory-file-name', metavar='NAME', help='the name of the inventory file to look for in each directory (default: %(default)s)', default="inventory.json")
     parser.add_argument('--log', metavar='PATH', help='base log file name (default: %(default)s)', default="slideshow.log")
@@ -176,6 +192,8 @@ def main():
         else:
             database_content = None
 
+        # FIXME: notice when the directories in the DB differ from the CLI options, also the --recursive flag
+
         if args.refresh_database or not database_content:
             directory_summary = {'count': 0, 'inventories': [], 'errors': 0}
             database_content = {'directories': sorted(args.directories), 'images': []}
@@ -184,7 +202,7 @@ def main():
             logger.info("Found %d inventory files containing %d records." % (directory_summary['count'],len(database_content['images'])))
             logger.info("Encountered %d errors loading inventories." % directory_summary['errors'])
 
-            write_database(database_content)
+            write_json(args.database_name, database_content)
 
         start_show(database_content)
 
