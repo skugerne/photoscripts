@@ -9,10 +9,14 @@ import argparse
 import glob, re
 import logging
 from collections import defaultdict
-import pygame_sdl2 as pygame
+import pygame
 import piexif
 from PIL import Image
+from time import sleep, time
 from random import choice
+from threading import Thread, Condition
+
+# import from our other files
 from inventory import setup_logger, load_json, write_json
 
 
@@ -159,6 +163,102 @@ def process_one_dir(path, directory_summary):
 
 
 
+class ImageCache():
+    def __init__(self, screen_res, paths):
+        self.screen_res = screen_res
+        self.paths = paths
+
+        self.image_cache = dict()         # map indexes of cached images to pygame surfaces
+        self.current_idx = 0
+        self.image_cache_lock = Condition()
+
+        self.thread = Thread(target=self.worker)
+        self.thread.daemon = True
+        self.thread.start()
+
+    def worker(self):
+        try:
+            while True:
+                with self.image_cache_lock:
+                    idx = self.current_idx
+
+                # find images most suitable to load and to unload
+                best_idx = None
+                best_score = len(self.paths)+1
+                worst_idx = None
+                worst_score = 0
+                for maybe_idx in range(len(self.paths)):
+                    score = abs(maybe_idx - idx)
+                    if maybe_idx in self.image_cache:
+                        if score > worst_score:
+                            worst_score = score
+                            worst_idx = maybe_idx
+                    else:
+                        if score < best_score:
+                            best_score = score
+                            best_idx = maybe_idx
+
+                if best_idx == None:
+                    logger.info("Everything seems to be cached.")
+                    assert len(self.image_cache) == len(self.paths), "Somehow not all images where cached."
+                    return
+                logger.debug("Load idx %d?" % best_idx)
+                idx = best_idx
+
+                # clean up the cache
+                if len(self.image_cache) > args.cache_count and worst_score > best_score+1:
+                    logger.debug("Unload idx %d." % worst_idx)
+                    assert worst_idx != None, "Somehow the worst index was not set."
+                    assert worst_idx != best_idx, "Somehow the best and worst indexes match."
+                    with self.image_cache_lock:
+                        del self.image_cache[worst_idx]
+
+                if len(self.image_cache) <= args.cache_count+1:
+
+                    # load an image
+                    path = self.paths[idx]
+                    logger.info("Load: %s" % path)
+                    srf = pygame.image.load(path)
+                    wid,hig = srf.get_size()
+                    widr = wid / self.screen_res[0]
+                    higr = hig / self.screen_res[1]
+                    if widr >= higr:
+                        # too wide, black bars top & bottom (or perfect fit)
+                        scale_res = (self.screen_res[0],self.screen_res[1]*(higr/widr))
+                        paste_at = (0,(self.screen_res[1]-scale_res[1])/2)
+                    else:
+                        # too tall, black bars left & right
+                        scale_res = (self.screen_res[0]*(widr/higr),self.screen_res[1])
+                        paste_at = ((self.screen_res[0]-scale_res[0])/2,0)
+                    srf = pygame.transform.smoothscale(srf,scale_res)
+                    blksrf = pygame.Surface(self.screen_res)
+                    blksrf.blit(srf,paste_at)
+
+                    # let the main thread know, in case its waiting
+                    with self.image_cache_lock:
+                        self.image_cache[idx] = blksrf
+                        self.image_cache_lock.notify_all()
+
+                else:
+                    logger.debug("Background thread sleeping.")
+                    sleep(0.5)
+        except Exception as err:
+            logger.error("Error in background thread.")
+            logger.error(err,exc_info=True)
+
+    def get_surface(self, idx):
+        """
+        Attempt to get the image surface, return None after a short delay if not found.
+        """
+
+        with self.image_cache_lock:
+            self.current_idx = idx
+            if idx not in self.image_cache:
+                self.image_cache_lock.wait(0.05)
+            return self.image_cache.get(idx)
+
+
+
 def start_show(database_content):
     logger.info("Start.")
 
@@ -171,12 +271,12 @@ def start_show(database_content):
         for month in sorted(grouped[year].keys()):
             paths.append(choice(grouped[year][month]))
 
-    logger.info("Lets show: %s" % str(paths))
-
-    import pygame
-    from time import sleep, time
+    logger.debug("Lets show: %s" % str(paths))
+    logger.info("Have chosen %d images to show." % len(paths))
 
     screen_res = (1024, 768)
+
+    cache = ImageCache(screen_res, paths)
 
     pygame.init()
     pygame.display.init()
@@ -184,34 +284,23 @@ def start_show(database_content):
     screensrf = pygame.display.get_surface()
 
     stop = False
+    manual = True
     idx = 0
     start_at = 0
+    direction = 1
     while not stop:
-        if time() - start_at > 2:
-            path = paths[idx]
-            srf = pygame.image.load(path)
-            wid,hig = srf.get_size()
-            widr = wid / screen_res[0]
-            higr = hig / screen_res[1]
-            if widr >= higr:
-                # too wide, black bars top & bottom (or perfect fit)
-                scale_res = (screen_res[0],screen_res[1]*(higr/widr))
-                paste_at = (0,(screen_res[1]-scale_res[1])/2)
-            else:
-                # too tall, black bars left & right
-                scale_res = (screen_res[0]*(widr/higr),screen_res[1])
-                paste_at = ((screen_res[0]-scale_res[0])/2,0)
-            srf = pygame.transform.smoothscale(srf,scale_res)
-            blksrf = pygame.Surface(screen_res)
-            blksrf.blit(srf,paste_at)
-            screensrf.blit(blksrf,(0,0))
-            pygame.display.flip()
-            start_at = time()
-            idx += 1
+        if manual or time() - start_at > 2:
+            if not manual:
+                idx += direction
+            srf = cache.get_surface(idx)
+            if srf:
+                screensrf.blit(srf,(0,0))
+                pygame.display.flip()
+                start_at = time()
         else:
             sleep(0.05)
 
-        stop = False
+        manual = False
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                stop = True
@@ -220,10 +309,13 @@ def start_show(database_content):
                     stop = True
                 elif event.key == pygame.K_LEFT:
                     idx -= 1
-                    start_at = 0
+                    manual = True
                 elif event.key == pygame.K_RIGHT:
                     idx += 1
-                    start_at = 0
+                    manual = True
+                elif event.key == pygame.K_SPACE:
+                    if direction: direction = 0
+                    else:         direction = 1
 
         if idx < 0: idx = 0
         if idx >= len(paths): idx = len(paths)-1
@@ -242,12 +334,18 @@ def main():
     parser.add_argument('--refresh-database', help='rebuild the database file from inventory files (rebuild is automatic if the database is empty or is based on different base paths)', action="store_true")
     parser.add_argument('--database-name', metavar='NAME', help='the name of a file to serve as a database of images to consider showing (default: %(default)s)', default="slideshow-db.json")
     parser.add_argument('--inventory-file-name', metavar='NAME', help='the name of the inventory file to look for in each directory (default: %(default)s)', default="inventory.json")
+    parser.add_argument('--cache-count', metavar='NUM', type=int, help='how many images to load into RAM for rapid display (default: %(default)s)', default=100)
     parser.add_argument('--log', metavar='PATH', help='base log file name (default: %(default)s)', default="slideshow.log")
     parser.add_argument('directories', metavar='DIR', nargs='+', help='directories to process')
     args = parser.parse_args()
 
     # set up a standard logger object
     logger = setup_logger(args.log, console_level=logging.INFO)
+
+    if args.cache_count < 10:
+        logger.error("The parameter --cache-count cannot be less than 10.")
+        logger.error("The program can not continue.")
+        exit(-1)
 
     try:
         # on Windows, expand special characters (on Linux, would perhaps expand previously escaped characters)
