@@ -68,6 +68,22 @@ def load_database():
 
 
 
+def convert_props_for_image(dt,sz):
+    """
+    Convert date and size strings to the formats we want.  Assumes both values are True-ey strings.
+    """
+
+    dt = parsedate(dt.encode('ascii'))
+
+    m = re.match(r"^(\d+)x(\d+)$",sz)
+    if not m:
+        return None,None
+    sz = int(m.group(0)) * int(m.group(1))
+
+    return dt,sz
+
+
+
 def get_props_for_image(path):
     """
     Find a date and image dimentions in the image EXIF data.
@@ -88,8 +104,8 @@ def get_props_for_image(path):
             dt = dt or parsedate(exif_dict["Exif"].get(piexif.ExifIFD.DateTimeDigitized))
             dt = dt or None
 
-            x = exif_dict["0th"].get(piexif.ImageIFD.ImageWidth) or exif_dict["Exif"].get(piexif.ExifIFD.PixelXDimension) or 0
-            y = exif_dict["0th"].get(piexif.ImageIFD.ImageLength) or exif_dict["Exif"].get(piexif.ExifIFD.PixelYDimension) or 0
+            x = min(exif_dict["0th"].get(piexif.ImageIFD.ImageWidth) or 0, exif_dict["Exif"].get(piexif.ExifIFD.PixelXDimension) or 0)
+            y = min(exif_dict["0th"].get(piexif.ImageIFD.ImageLength) or 0, exif_dict["Exif"].get(piexif.ExifIFD.PixelYDimension) or 0)
             sz = x * y or None
 
             return dt,sz
@@ -113,10 +129,18 @@ def process_one_dir(path, directory_summary):
             filtered_contents = []
             directory_summary['count'] += 1
             directory_summary['inventories'].append(path)
-            for name,_,_ in contents:                  # ignore checksum and byte-size from the inventory file
+            for line in contents:
+                if len(line) == 3:
+                    name = line[0]                     # ignore checksum and byte-size from the inventory file
+                    dt,sz = None,None                  # short inventory format lacks date and size
+                else:
+                    name,_,_,dt,sz = line              # extended inventory format has date and size
                 name = os.path.join(path,name)
                 if name.lower().endswith(".jpg"):      # only jpg images
-                    dt,sz = get_props_for_image(name)
+                    if dt and sz:                      # skip looking at the image header if we can
+                        dt,sz = convert_props_for_image(dt,sz)
+                    if not (dt and sz):
+                        dt,sz = get_props_for_image(name)
                     if dt and sz and sz > 1600*1200:   # only images with date, size metadata, and of a certain min resolution
                         filtered_contents.append((dt,name))
     except OSError as err:
@@ -148,6 +172,63 @@ def start_show(database_content):
             paths.append(choice(grouped[year][month]))
 
     logger.info("Lets show: %s" % str(paths))
+
+    import pygame
+    from time import sleep, time
+
+    screen_res = (1024, 768)
+
+    pygame.init()
+    pygame.display.init()
+    pygame.display.set_mode(size=screen_res)
+    screensrf = pygame.display.get_surface()
+
+    stop = False
+    idx = 0
+    start_at = 0
+    while not stop:
+        if time() - start_at > 2:
+            path = paths[idx]
+            srf = pygame.image.load(path)
+            wid,hig = srf.get_size()
+            widr = wid / screen_res[0]
+            higr = hig / screen_res[1]
+            if widr >= higr:
+                # too wide, black bars top & bottom (or perfect fit)
+                scale_res = (screen_res[0],screen_res[1]*(higr/widr))
+                paste_at = (0,(screen_res[1]-scale_res[1])/2)
+            else:
+                # too tall, black bars left & right
+                scale_res = (screen_res[0]*(widr/higr),screen_res[1])
+                paste_at = ((screen_res[0]-scale_res[0])/2,0)
+            srf = pygame.transform.smoothscale(srf,scale_res)
+            blksrf = pygame.Surface(screen_res)
+            blksrf.blit(srf,paste_at)
+            screensrf.blit(blksrf,(0,0))
+            pygame.display.flip()
+            start_at = time()
+            idx += 1
+        else:
+            sleep(0.05)
+
+        stop = False
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+               stop = True
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    stop = True
+                elif event.key == pygame.K_LEFT:
+                    idx -= 1
+                    start_at = 0
+                elif event.key == pygame.K_RIGHT:
+                    idx += 1
+                    start_at = 0
+
+        if idx < 0: idx = 0
+        if idx >= len(paths): idx = len(paths)-1
+
+    pygame.quit()
 
 
 
