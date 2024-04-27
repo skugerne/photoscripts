@@ -13,6 +13,7 @@ import pygame
 import piexif
 from PIL import Image
 from time import sleep, time
+from datetime import datetime
 from random import choice
 from threading import Thread, Condition
 
@@ -24,6 +25,7 @@ from inventory import setup_logger, load_json, write_json
 # globals
 logger = None
 args = None
+current_year = datetime.now().year
 
 
 
@@ -34,15 +36,21 @@ def parsedate(datestr):
 
     if not datestr:
         return None
-    
+
     # ex: b'2005-06-27T09:56:05-04:00'
     # ex: b'2006:05:22 19:17:28\x00'
     m = re.match(rb"^(\d\d\d\d)[:-](\d\d)[:-](\d\d)[T ](\d\d):(\d\d):(\d\d)(\000|[+-]\d\d:\d\d)?$",datestr)
     if not m:
         logger.warning("Failed to parse: %s" % datestr)
         return None
-    
-    return tuple(int(m.group(x+1)) for x in range(6))
+
+    res = tuple(int(m.group(x+1)) for x in range(6))
+    bounds = ((2000,current_year), (1,12), (1,31), (0,24), (0,59), (0,59))
+    for idx in range(6):
+        if res[idx] < bounds[idx][0] or res[idx] > bounds[idx][1]:
+            return None   # ignore obviously incorrect dates
+
+    return res
 
 
 
@@ -108,8 +116,9 @@ def get_props_for_image(path):
             dt = dt or parsedate(exif_dict["Exif"].get(piexif.ExifIFD.DateTimeDigitized))
             dt = dt or None
 
-            x = min(exif_dict["0th"].get(piexif.ImageIFD.ImageWidth) or 0, exif_dict["Exif"].get(piexif.ExifIFD.PixelXDimension) or 0)
-            y = min(exif_dict["0th"].get(piexif.ImageIFD.ImageLength) or 0, exif_dict["Exif"].get(piexif.ExifIFD.PixelYDimension) or 0)
+            x, y = imgobj.size
+            if y > x:
+                logger.info("img %d x %d" % (x,y))
             sz = x * y or None
 
             return dt,sz
@@ -259,12 +268,29 @@ class ImageCache():
 
 
 
+def text_box(text, textcolor, backgroundcolor):
+    """
+    Create a surface with text on it.
+    """
+
+    font = pygame.font.Font(pygame.font.get_default_font(), 28)
+    spacing = 4
+    text_surface = font.render(text, True, textcolor, backgroundcolor)
+    text_surface_2 = pygame.surface.Surface((text_surface.get_size()[0]+spacing*2,text_surface.get_size()[1]+spacing*2))
+    text_surface_2.fill(backgroundcolor)
+    text_surface_2.blit(text_surface, dest=(spacing,spacing))
+    return text_surface_2
+
+
+
 def start_show(database_content):
     logger.info("Start.")
 
     grouped = defaultdict(lambda: defaultdict(lambda: []))
+    path_to_date = dict()
     for dt,path in database_content['images']:
         grouped[dt[0]][dt[1]].append(path)  # year, month
+        path_to_date[path] = dt
 
     paths = []
     for year in sorted(grouped.keys()):
@@ -282,19 +308,23 @@ def start_show(database_content):
     pygame.display.init()
     pygame.display.set_mode(size=screen_res)
     screensrf = pygame.display.get_surface()
+    pygame.display.set_caption('Slideshow')
 
     stop = False
     manual = True
     idx = 0
     start_at = 0
     direction = 1
+    flip_time = 2
     while not stop:
-        if manual or time() - start_at > 2:
+        if manual or time() - start_at > flip_time:
             if not manual:
                 idx += direction
             srf = cache.get_surface(idx)
             if srf:
                 screensrf.blit(srf,(0,0))
+                txt_srf = text_box("%04d-%02d-%02d" % tuple(path_to_date[paths[idx]][0:3]), (255,255,255), (0,0,0))
+                screensrf.blit(txt_srf,(0,0))
                 pygame.display.flip()
                 start_at = time()
         else:
@@ -313,6 +343,10 @@ def start_show(database_content):
                 elif event.key == pygame.K_RIGHT:
                     idx += 1
                     manual = True
+                elif event.key == pygame.K_UP:
+                    flip_time += 1
+                elif event.key == pygame.K_DOWN:
+                    flip_time = max(1,flip_time-1)
                 elif event.key == pygame.K_SPACE:
                     if direction: direction = 0
                     else:         direction = 1
