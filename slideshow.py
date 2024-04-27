@@ -172,6 +172,46 @@ def process_one_dir(path, directory_summary):
 
 
 
+def select_image_subset(database_content):
+    """
+    Select a subset of images to show.  Return their paths and a dict() mapping the paths to dates.
+    """
+
+    # group by year, month
+    grouped = defaultdict(lambda: [])
+    path_to_date = dict()
+    for dt,path in database_content['images']:
+        grouped[(dt[0],dt[1])].append((dt,path))
+        path_to_date[path] = dt
+
+    # drop the year/month keys, key only lists
+    grouped = [v for _,v in sorted(grouped.items())]
+
+    # if a month has too few pictures, combine it with the following month(s)
+    re_grouped = [[]]
+    for g in grouped:
+        if len(re_grouped[-1]) < 500:
+            re_grouped[-1] = re_grouped[-1] + g
+        else:
+            re_grouped.append(g)
+    assert sum(len(x) for x in re_grouped) == sum(len(x) for x in grouped), "Lost some images."
+
+    # select two per bucket
+    paths = []
+    for g in re_grouped:
+        for _ in range(3):
+            paths.append(choice(g))
+
+    # sort by date, then drop the date
+    paths = [path for _,path in sorted(paths)]
+
+    logger.debug("Lets show: %s" % str(paths))
+    logger.info("Have chosen %d images to show." % len(paths))
+
+    return paths,path_to_date
+
+
+
 class ImageCache():
     def __init__(self, screen_res, paths):
         self.screen_res = screen_res
@@ -286,19 +326,7 @@ def text_box(text, textcolor, backgroundcolor):
 def start_show(database_content):
     logger.info("Start.")
 
-    grouped = defaultdict(lambda: defaultdict(lambda: []))
-    path_to_date = dict()
-    for dt,path in database_content['images']:
-        grouped[dt[0]][dt[1]].append(path)  # year, month
-        path_to_date[path] = dt
-
-    paths = []
-    for year in sorted(grouped.keys()):
-        for month in sorted(grouped[year].keys()):
-            paths.append(choice(grouped[year][month]))
-
-    logger.debug("Lets show: %s" % str(paths))
-    logger.info("Have chosen %d images to show." % len(paths))
+    paths,path_to_date = select_image_subset(database_content)
 
     screen_res = (1024, 768)
 
@@ -322,6 +350,7 @@ def start_show(database_content):
                 idx += direction
             srf = cache.get_surface(idx)
             if srf:
+                logger.info("Draw image #%d of %d." % (idx+1,len(paths)))
                 screensrf.blit(srf,(0,0))
                 txt_srf = text_box("%04d-%02d-%02d" % tuple(path_to_date[paths[idx]][0:3]), (255,255,255), (0,0,0))
                 screensrf.blit(txt_srf,(0,0))
