@@ -251,7 +251,7 @@ class ImageCache():
                     logger.info("Everything seems to be cached.")
                     assert len(self.image_cache) == len(self.paths), "Somehow not all images where cached."
                     return
-                logger.debug("Load idx %d?" % best_idx)
+                logger.debug("Maybe load idx %d?" % best_idx)
                 idx = best_idx
 
                 # clean up the cache
@@ -269,22 +269,25 @@ class ImageCache():
                     logger.info("Load: %s" % path)
                     srf = pygame.image.load(path)
                     wid,hig = srf.get_size()
-                    widr = wid / self.screen_res[0]
-                    higr = hig / self.screen_res[1]
-                    if widr >= higr:
-                        # too wide, black bars top & bottom (or perfect fit)
-                        scale_res = (self.screen_res[0],self.screen_res[1]*(higr/widr))
-                        paste_at = (0,(self.screen_res[1]-scale_res[1])/2)
-                    else:
-                        # too tall, black bars left & right
-                        scale_res = (self.screen_res[0]*(widr/higr),self.screen_res[1])
-                        paste_at = ((self.screen_res[0]-scale_res[0])/2,0)
-                    srf = pygame.transform.smoothscale(srf,scale_res)
-                    blksrf = pygame.Surface(self.screen_res)
-                    blksrf.blit(srf,paste_at)
 
-                    # let the main thread know, in case its waiting
                     with self.image_cache_lock:
+                        # we'll be doing some work with the lock held because the screen res can be changed on us
+
+                        widr = wid / self.screen_res[0]
+                        higr = hig / self.screen_res[1]
+                        if widr >= higr:
+                            # too wide, black bars top & bottom (or perfect fit)
+                            scale_res = (self.screen_res[0],self.screen_res[1]*(higr/widr))
+                            paste_at = (0,(self.screen_res[1]-scale_res[1])/2)
+                        else:
+                            # too tall, black bars left & right
+                            scale_res = (self.screen_res[0]*(widr/higr),self.screen_res[1])
+                            paste_at = ((self.screen_res[0]-scale_res[0])/2,0)
+                        srf = pygame.transform.smoothscale(srf,scale_res)
+                        blksrf = pygame.Surface(self.screen_res)
+                        blksrf.blit(srf,paste_at)
+
+                        # let the main thread know, in case its waiting
                         self.image_cache[idx] = blksrf
                         self.image_cache_lock.notify_all()
 
@@ -305,6 +308,45 @@ class ImageCache():
             if idx not in self.image_cache:
                 self.image_cache_lock.wait(0.05)
             return self.image_cache.get(idx)
+        
+    def set_screen(self, screen_res):
+        """
+        Throw out images that have been cached with the wrong resolution.
+        """
+
+        with self.image_cache_lock:
+            # we need to hold the lock to coordinate with any image that may be in the loading process
+            self.screen_res = screen_res
+            self.image_cache.clear()
+
+
+
+def apply_screen_setting(fullscreen):
+    """
+    Change between windowed and fullscreen mode.
+    """
+
+    desktops = pygame.display.get_desktop_sizes()
+    if len(desktops) != 1:
+        logger.warning("There are %d desktops." % len(desktops))
+    num_screens = pygame.display.get_num_displays()
+    if num_screens != 1:
+        logger.warning("There are %d screens." % num_screens)
+
+    if fullscreen:
+        logger.info("Fullscreen mode.")
+        more = {'flags': pygame.FULLSCREEN}
+        screen_res = desktops[0]
+    else:
+        logger.info("Windowed mode.")
+        screen_res = (1024,768)
+        more = {}
+
+    pygame.display.set_mode(size=screen_res, **more)
+    screen_srf = pygame.display.get_surface()
+    pygame.display.set_caption('Slideshow')
+
+    return screen_res, screen_srf
 
 
 
@@ -328,16 +370,13 @@ def start_show(database_content):
 
     paths,path_to_date = select_image_subset(database_content)
 
-    screen_res = (1024, 768)
+    pygame.init()
+    pygame.display.init()
+    screen_res, screen_srf = apply_screen_setting(False)
 
     cache = ImageCache(screen_res, paths)
 
-    pygame.init()
-    pygame.display.init()
-    pygame.display.set_mode(size=screen_res)
-    screensrf = pygame.display.get_surface()
-    pygame.display.set_caption('Slideshow')
-
+    fullscreen = False
     stop = False
     manual = True
     idx = 0
@@ -350,21 +389,23 @@ def start_show(database_content):
                 idx += direction
             srf = cache.get_surface(idx)
             if srf:
-                logger.info("Draw image #%d of %d." % (idx+1,len(paths)))
-                screensrf.blit(srf,(0,0))
+                logger.info("Show image #%d of %d." % (idx+1,len(paths)))
+                screen_srf.blit(srf,(0,0))
                 txt_srf = text_box("%04d-%02d-%02d" % tuple(path_to_date[paths[idx]][0:3]), (255,255,255), (0,0,0))
-                screensrf.blit(txt_srf,(0,0))
+                screen_srf.blit(txt_srf,(0,0))
                 pygame.display.flip()
                 start_at = time()
+                manual = False
+            else:
+                logger.debug("Image #%d of %d not available yet." % (idx+1,len(paths)))
         else:
             sleep(0.05)
 
-        manual = False
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                stop = True
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
+                if event.key == pygame.K_ESCAPE or event.key == pygame.K_q:
                     stop = True
                 elif event.key == pygame.K_LEFT:
                     idx -= 1
@@ -376,6 +417,10 @@ def start_show(database_content):
                     flip_time += 1
                 elif event.key == pygame.K_DOWN:
                     flip_time = max(1,flip_time-1)
+                elif event.key == pygame.K_f:
+                    fullscreen = not fullscreen
+                    screen_res, screen_srf = apply_screen_setting(fullscreen)
+                    cache.set_screen(screen_res)
                 elif event.key == pygame.K_SPACE:
                     if direction: direction = 0
                     else:         direction = 1
