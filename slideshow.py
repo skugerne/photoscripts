@@ -322,7 +322,18 @@ class ImageCache():
 
                     # load an image
                     logger.info("Load: %s" % path)
-                    srf = pygame.image.load(path)
+                    with Image.open(path) as imgobj:
+                        oval = 1
+                        exif_dict = piexif.load(imgobj.info['exif'])    # should not be here without usable EXIF
+                        oval = exif_dict["0th"].get(piexif.ImageIFD.Orientation)
+                        logger.debug("Orientation value: %s" % oval)
+                        srf = pygame.image.frombytes(imgobj.tobytes(), imgobj.size, "RGB")
+                        if oval == 6:
+                            # rotate CW 90
+                            srf = pygame.transform.rotate(srf,270)
+                        elif oval == 8:
+                            # rotate 90 CCW
+                            srf = pygame.transform.rotate(srf,90)
                     wid,hig = srf.get_size()
 
                     with self.image_cache_lock:
