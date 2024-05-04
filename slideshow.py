@@ -174,7 +174,7 @@ def process_one_dir(path, directory_summary):
 
 def select_image_subset(database_content):
     """
-    Select a subset of images to show.  Return their paths and a dict() mapping the paths to dates.
+    Select a subset of images to show.  Return a tuple: (paths, dict() mapping the paths to date tuples)
     """
 
     # group by year, month
@@ -182,7 +182,7 @@ def select_image_subset(database_content):
     path_to_date = dict()
     for dt,path in database_content['images']:
         grouped[(dt[0],dt[1])].append((dt,path))
-        path_to_date[path] = dt
+        path_to_date[path] = tuple(dt)
 
     # drop the year/month keys, key only lists
     grouped = [v for _,v in sorted(grouped.items())]
@@ -212,10 +212,65 @@ def select_image_subset(database_content):
 
 
 
+def more_images(current_idx, current_paths, path_to_date, database_content):
+    """
+    Extend the subset of images to show, centered on the given image.  Return the new index and paths.
+    """
+
+    # arrange images by dates (which are 6-element tuples)
+    dt_to_paths = defaultdict(lambda: [])
+    for dt,path in database_content['images']:
+        dt_to_paths[tuple(dt)].append(path)
+
+    # get all possible dates in a list sorted list
+    all_date_list = sorted(dt_to_paths.keys())
+
+    # find the date index of our currently displayed image (so we can search near it)
+    dt_index = None
+    for dt,paths in dt_to_paths.items():
+        if path in paths:
+            dt_index = all_date_list.index(dt)
+
+    assert dt_index != None, "Failed to find our date index."
+
+    pathset = set(current_paths)
+    added = []
+
+    def addfunc(dt_idx):
+        if dt_idx >= 0 and dt_idx < len(all_date_list):
+            dt = all_date_list[dt_idx]
+            for path in dt_to_paths[dt]:
+                if path not in pathset:
+                    logger.info("Add path: %s" % path)
+                    added.append(path)
+
+    # find nearby images that we don't already have
+    working_dt_idx_offset = 1
+    while len(added) < 20 and len(added) + len(current_paths) < len(database_content['images']):
+        addfunc(dt_index - working_dt_idx_offset)
+        addfunc(dt_index + working_dt_idx_offset)
+        working_dt_idx_offset += 1
+        assert working_dt_idx_offset < len(all_date_list), "Runaway date list index."
+
+    new_paths = []
+    for path in current_paths+added:
+        dt = path_to_date[path]
+        new_paths.append((dt,path))
+    new_paths = [x[1] for x in sorted(new_paths)]
+    new_idx = new_paths.index(current_paths[current_idx])
+
+    logger.debug("New paths: %s" % str(new_paths))
+
+    return new_idx, new_paths
+
+
+
 class ImageCache():
     def __init__(self, screen_res, paths):
-        self.screen_res = screen_res
-        self.paths = paths
+        self.screen_res = screen_res      # tuple for the resolution to cache images at
+        self.paths = paths                # paths to image files, sorted by date (but the date is not provided here)
+        self.path_to_idx = dict((p,i) for i,p in enumerate(paths))
+        self.run = True
 
         self.image_cache = dict()         # map indexes of cached images to pygame surfaces
         self.current_idx = 0
@@ -227,45 +282,43 @@ class ImageCache():
 
     def worker(self):
         try:
-            while True:
+            while self.run:
                 with self.image_cache_lock:
-                    idx = self.current_idx
+                    # we'll be doing some work with the lock held because the list of paths can be changed on us
 
-                # find images most suitable to load and to unload
-                best_idx = None
-                best_score = len(self.paths)+1
-                worst_idx = None
-                worst_score = 0
-                for maybe_idx in range(len(self.paths)):
-                    score = abs(maybe_idx - idx)
-                    if maybe_idx in self.image_cache:
-                        if score > worst_score:
-                            worst_score = score
-                            worst_idx = maybe_idx
-                    else:
-                        if score < best_score:
-                            best_score = score
-                            best_idx = maybe_idx
+                    # find images most suitable to load and to unload
+                    best_idx = None
+                    best_score = len(self.paths)+1
+                    worst_idx = None
+                    worst_score = 0
+                    for maybe_idx in range(len(self.paths)):
+                        score = abs(maybe_idx - self.current_idx)
+                        if maybe_idx in self.image_cache:
+                            if score > worst_score:
+                                worst_score = score
+                                worst_idx = maybe_idx
+                        else:
+                            if score < best_score:
+                                best_score = score
+                                best_idx = maybe_idx
 
-                if best_idx == None:
-                    logger.info("Everything seems to be cached.")
-                    assert len(self.image_cache) == len(self.paths), "Somehow not all images where cached."
-                    return
-                logger.debug("Maybe load idx %d?" % best_idx)
-                idx = best_idx
+                    if best_idx == None:
+                        logger.info("Everything seems to be cached (%d images in list, current idx %d)." % (len(self.paths),self.current_idx))
+                        assert len(self.image_cache) == len(self.paths), "Somehow not all images where cached when expected."
+                        return
+                    logger.debug("Maybe load idx %d?" % best_idx)
+                    path = self.paths[best_idx]
 
-                # clean up the cache
-                if len(self.image_cache) > args.cache_count and worst_score > best_score+1:
-                    logger.debug("Unload idx %d." % worst_idx)
-                    assert worst_idx != None, "Somehow the worst index was not set."
-                    assert worst_idx != best_idx, "Somehow the best and worst indexes match."
-                    with self.image_cache_lock:
+                    # clean up the cache
+                    if len(self.image_cache) > args.cache_count and worst_score > best_score+1:
+                        logger.debug("Unload idx %d." % worst_idx)
+                        assert worst_idx != None, "Somehow the worst index was not set."
+                        assert worst_idx != best_idx, "Somehow the best and worst indexes match."
                         del self.image_cache[worst_idx]
 
                 if len(self.image_cache) <= args.cache_count+1:
 
                     # load an image
-                    path = self.paths[idx]
                     logger.info("Load: %s" % path)
                     srf = pygame.image.load(path)
                     wid,hig = srf.get_size()
@@ -287,9 +340,15 @@ class ImageCache():
                         blksrf = pygame.Surface(self.screen_res)
                         blksrf.blit(srf,paste_at)
 
-                        # let the main thread know, in case its waiting
-                        self.image_cache[idx] = blksrf
-                        self.image_cache_lock.notify_all()
+                        # store the result, careful to protect against the list of paths having changed
+                        if path in self.path_to_idx:
+                            idx = self.path_to_idx[path]
+                            self.image_cache[idx] = blksrf
+
+                            # let the main thread know, in case its waiting
+                            self.image_cache_lock.notify_all()
+                        else:
+                            logger.info("Freshly-loaded image no longer has a valid path.")
 
                 else:
                     logger.debug("Background thread sleeping.")
@@ -308,7 +367,7 @@ class ImageCache():
             if idx not in self.image_cache:
                 self.image_cache_lock.wait(0.05)
             return self.image_cache.get(idx)
-        
+
     def set_screen(self, screen_res):
         """
         Throw out images that have been cached with the wrong resolution.
@@ -318,6 +377,39 @@ class ImageCache():
             # we need to hold the lock to coordinate with any image that may be in the loading process
             self.screen_res = screen_res
             self.image_cache.clear()
+
+    def set_paths(self, paths):
+        """
+        Replace the current list of paths with new ones, keep cached images when possible.
+        """
+
+        logger.debug("Load new image list with %d items." % len(paths))
+
+        with self.image_cache_lock:
+            old_cache = self.image_cache
+            old_path_to_idx = self.path_to_idx
+
+            # if our currently selected image continues to exist, use that index
+            # otherwise, set our current image to the start of the new list
+            current_path = self.paths[self.current_idx]
+            if current_path in paths:
+                self.current_idx = paths.index(current_path)
+            else:
+                self.current_idx = 0
+
+            overlap = set(self.paths).intersection(set(paths))
+            logger.debug("There are %d images to carry over from the old cache." % len(overlap))
+
+            self.image_cache = dict()
+            self.path_to_idx = dict((p,i) for i,p in enumerate(paths))
+            self.paths = paths
+
+            for path in overlap:
+                old_idx = old_path_to_idx[path]
+                new_idx = self.path_to_idx[path]
+                if old_idx in old_cache:
+                    # reference the image data in the new dict()
+                    self.image_cache[new_idx] = old_cache[old_idx]
 
 
 
@@ -417,12 +509,15 @@ def start_show(database_content):
                     flip_time += 1
                 elif event.key == pygame.K_DOWN:
                     flip_time = max(1,flip_time-1)
-                elif event.key == pygame.K_f:
+                elif event.key == pygame.K_f:       # toggle fullscreen
                     fullscreen = not fullscreen
                     screen_res, screen_srf = apply_screen_setting(fullscreen)
                     cache.set_screen(screen_res)
+                elif event.key == pygame.K_m:       # add more nearby images
+                    idx,paths = more_images(idx,paths,path_to_date,database_content)
+                    cache.set_paths(paths)
                 elif event.key == pygame.K_SPACE:
-                    if direction: direction = 0
+                    if direction: direction = 0     # toggle flipping pause
                     else:         direction = 1
 
         if idx < 0: idx = 0
