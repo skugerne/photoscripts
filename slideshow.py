@@ -224,13 +224,15 @@ def more_images(current_idx, current_paths, path_to_date, database_content):
 
     # get all possible dates in a list sorted list
     all_date_list = sorted(dt_to_paths.keys())
+    logger.info("The list of distinct dates is %d elements." % len(all_date_list))
 
     # find the date index of our currently displayed image (so we can search near it)
     dt_index = None
     for dt,paths in dt_to_paths.items():
-        if path in paths:
+        if current_paths[current_idx] in paths:
             dt_index = all_date_list.index(dt)
 
+    logger.info("Have determined that our current index in the list of dates is %s." % dt_index)
     assert dt_index != None, "Failed to find our date index."
 
     pathset = set(current_paths)
