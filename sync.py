@@ -44,9 +44,9 @@ def get_root_dir(inv):
     Find the shared root of all paths in the given inventory.
     """
 
-    common = inv[0][0]
-    for path,_,_ in inv[1:]:
-        common = overlap(common,path)
+    common = inv[0][0]                    # grab file path/name
+    for bits in inv[1:]:
+        common = overlap(common,bits[0])  # grab file path/name
 
     if not common.endswith("/"):
         bits = common.split("/")
@@ -117,8 +117,8 @@ def do_work(inv1,inv2):
     idx1 = 0
     idx2 = 0
     while idx1 < len(inv1) and idx2 < len(inv2):
-        path1,size1,checksum1 = inv1[idx1]
-        path2,size2,checksum2 = inv2[idx2]
+        path1,size1,checksum1,*more = inv1[idx1]
+        path2,size2,checksum2,*more = inv2[idx2]
 
         path1b = path1[len(root1):]
         path2b = path2[len(root2):]
