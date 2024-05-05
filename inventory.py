@@ -7,17 +7,16 @@ Make and verify inventory files.
 import os
 import sys
 import shutil
-import hashlib, math
 import datetime
-import json
+import json, re
 import logging
 from logging.handlers import RotatingFileHandler
-import argparse
-import glob
+import argparse, glob
 from collections import defaultdict
 from multiprocessing import cpu_count
 from multiprocessing.dummy import Pool as ThreadPool
 import PIL.Image as Image
+import piexif
 
 
 
@@ -26,6 +25,7 @@ logger = None
 args = None
 filter_summary = {'rejected': defaultdict(lambda: 0), 'passed': defaultdict(lambda: 0)}
 all_inventories = dict()
+current_year = datetime.datetime.now().year
 
 all_media_files = ('.jpg','.jpeg','.png','.tif','.tiff','.gif','.mp4','.mov','.avi','.wmv','.mpg','.cr2','.mp3')
 checkable_image_files = ('.jpg','.jpeg','.png')
@@ -210,7 +210,7 @@ def file_lister(in_path, file_list, recursive=False, join_func=os.path.join, ign
             file_list.append(full_file)
 
 
-    
+
 def is_unicode(v):
     """
     Return True if the given value is native unicode, False otherwise.
@@ -224,6 +224,116 @@ def is_bytes(v):
     Return True if the given value is native bytes, False otherwise.
     """
     return bool(sys.version_info >= (3,0,0) and type(v) == bytes) or (sys.version_info < (3,0,0) and type(v) == str)  # pylint: disable=undefined-variable
+
+
+
+def parse_date_str(datestr):
+    """
+    Parse a date string into a tuple.  Currently ignores timezone.  Rejects obviously incorrect values.
+    """
+
+    if not datestr:
+        return None
+
+    # we operate on binary since sometimes we want to use this on binary strings that, apparently, contain a null byte
+    if is_unicode(datestr):
+        datestr = datestr.encode('ascii')
+
+    # ex: b'2005-06-27T09:56:05-04:00'
+    # ex: b'2006:05:22 19:17:28\x00'
+    m = re.match(rb"^(\d\d\d\d)[:-](\d\d)[:-](\d\d)[T ](\d\d):(\d\d):(\d\d)Z?(\000|[+-]\d\d:\d\d)?$",datestr)
+    if not m:
+        logger.warning("Failed to parse: %s" % datestr)
+        return None
+
+    res = tuple(int(m.group(x+1)) for x in range(6))
+    bounds = ((1998,current_year), (1,12), (1,31), (0,24), (0,59), (0,59))    # anything before the year 1998 is considered obviously incorrect
+    for idx in range(6):
+        if res[idx] < bounds[idx][0] or res[idx] > bounds[idx][1]:
+            return None   # ignore obviously incorrect dates
+
+    return res
+
+
+
+def format_date_tuple(datetuple):
+    """
+    Convert a date tuple to our standard string format.
+    """
+    return "%04d-%02d-%02d %02d:%02d:%02d" % datetuple
+
+
+
+def parse_dim_str(dimstr):
+    """
+    Convert dimention string to a tuple.
+    """
+
+    if not dimstr:
+        return None
+
+    m = re.match(r"^(\d+)x(\d+)$",dimstr)
+    if not m:
+        raise ValueError("Unable to parse dimentions string.")
+    return int(m.group(1)), int(m.group(2))
+
+
+
+def format_dim_tuple(dimtuple):
+    """
+    Convert a dimention tuple to our standard string format.
+    """
+    return "%dx%d" % dimtuple
+
+
+
+class InventoryItem():
+    """
+    Class to parse an inventory entry for a file, for cases where fancy code is called for.
+    """
+
+    def __init__(self, bits):
+        self.name = bits[0]                       # with or without path
+        self.size = bits[1]                       # bytes, int
+        self.checksum = bits[2]                   # checksum, by default sha256 hex digest in lower case
+        if len(bits) == 5:
+            self.date = parse_date_str(bits[3])   # "2000-01-01 01:01:01" or a limited number of variations on that
+            self.dims = parse_dim_str(bits[4])    # "WxH"
+        else:
+            self.date = None
+            self.dims = None
+
+    def as_tuple(self):
+        """
+        Return a 3- or 5-element tuple (name,size,checksum[,date,dims]).
+        """
+
+        if self.date and self.dims:
+            dt = format_date_tuple(self.date)
+            sz = format_dim_tuple(self.dims)
+            return (self.name, self.size, self.checksum, dt, sz)
+        return (self.name, self.size, self.checksum)
+
+    def __lt__(self, other):
+        return (self.name, self.size, self.checksum) < (other.name, other.size, other.checksum)
+
+    def __le__(self, other):
+        return (self.name, self.size, self.checksum) <= (other.name, other.size, other.checksum)
+
+    def __eq__(self, other):
+        return (self.name, self.size, self.checksum) == (other.name, other.size, other.checksum)
+
+    def __ne__(self, other):
+        return (self.name, self.size, self.checksum) != (other.name, other.size, other.checksum)
+
+    def __gt__(self, other):
+        return (self.name, self.size, self.checksum) > (other.name, other.size, other.checksum)
+
+    def __ge__(self, other):
+        return (self.name, self.size, self.checksum) >= (other.name, other.size, other.checksum)
+
+    def __hash__(self):
+        return hash((self.name, self.size, self.checksum))
 
 
 
@@ -273,16 +383,53 @@ def make_file_id(path, calculate_checksums=True):
 
 
 
-def directory_inventory(directory, remove_directory=None, recursive=True, ignore_files=None, filter_func=None, worker_callback=None, calculate_checksums=True, escape_non_ascii=True, parallel=True):
+def obtain_image_info(path):
     """
-    Produce a list of tuples (name,size,checksum) for the files in the given directory.  Name is native unicode.
+    For jpg and png files, open them to check for validity, to look for exif dates, and to determine dimentions.
+
+    Return (date as str, dims as str), one or both of which can be None.
+    """
+
+    with Image.open(path) as imgobj:
+        if 'exif' in imgobj.info:
+            try:
+                exif_dict = piexif.load(imgobj.info['exif'])
+            except Exception as err:
+                logger.warning("Failed to read exif: %s" % path)
+                logger.debug(err, exc_info=True)
+                dt = None
+            else:
+                try:
+                    # the piexif lib gives us what it can find in the exif data
+                    dt = parse_date_str(exif_dict["0th"].get(piexif.ImageIFD.DateTime))
+                    dt = dt or parse_date_str(exif_dict["Exif"].get(piexif.ExifIFD.DateTimeOriginal))
+                    dt = dt or parse_date_str(exif_dict["Exif"].get(piexif.ExifIFD.DateTimeDigitized))
+                    dt = dt or None
+                    if dt:
+                        dt = format_date_tuple(dt)
+                except KeyError:
+                    logger.warning("Failed to read exif (missing key): %s" % path)
+                    dt = None
+        else:
+            logger.debug("Did not find exif data: %s" % path)
+            dt = None
+
+        # pillow will give us the actual observed image size
+        sz = format_dim_tuple(imgobj.size) if imgobj.size[0] and imgobj.size[1] else None
+
+        return dt,sz
+
+
+
+def directory_inventory(directory, remove_directory=None, recursive=True, ignore_files=None, filter_func=None, calculate_checksums=True, escape_non_ascii=True, parallel=True):
+    """
+    Produce a list of tuples (name,size,checksum[,date,dims]) for the files in the given directory.  Name is native unicode.
 
     directory:            the directory to process
     remove_directory:     the given directory name is removed from the start of the paths stored in the tuples, when True the entire root directory is removed
     recursive:            also inventory subdirectories
     ignore_files:         a list() of files or directories to be excluded from the inventory check (possibly the inventory file itself), considered independent of path
     filter_func:          when specified, must return a True-ey value for any acceptable file name to be included (path is not included)
-    worker_callback:      when specified, an extra function called from the worker thread
     calculate_checksums:  when True-ey, calculate a checksum for each file, by default sha256, with "crc32" and "md5" as valid alternatives
     escape_non_ascii:     when True-ey, replace various characters in the filenames with a (0xFF) notation, note does not escape existing (0xFF) in filenames
     """
@@ -301,42 +448,50 @@ def directory_inventory(directory, remove_directory=None, recursive=True, ignore
     else:
         pool = None
 
-    checksums = list()
-    for idx,aFile in enumerate(files):
-        def worker(idx,aFile):
+    inventory_items = list()
+    for idx,a_file in enumerate(files):
+        def worker(idx,a_file):
             try:
-                logger.debug(u"ID file %s of %s: '%s'" % (idx+1,len(files),cleanse_bytes(aFile)))
-                (size,checksum) = make_file_id(aFile, calculate_checksums)
-                if worker_callback: worker_callback(aFile, size, checksum)
+                logger.debug(u"ID file %s of %s: '%s'" % (idx+1,len(files),cleanse_bytes(a_file)))
+                size,checksum = make_file_id(a_file, calculate_checksums)
+
+                # get image properties for certain file types
+                _, ext = os.path.splitext(a_file.lower())
+                more = []
+                if ext in checkable_image_files:
+                    dt,dim = obtain_image_info(a_file)
+                    if dt or dim:
+                        more = [dt, dim]
+
                 if remove_directory:
-                    if aFile.startswith(remove_directory):
-                        aFile = aFile[len(remove_directory):]
-                        aFile = aFile.lstrip(os.path.sep)   # if part of the path is removed, what remains can not start with the directory separator
+                    if a_file.startswith(remove_directory):
+                        a_file = a_file[len(remove_directory):]
+                        a_file = a_file.lstrip(os.path.sep)   # if part of the path is removed, what remains can not start with the directory separator
                     else:
                         raise Exception("Unable to remove directory from path.")
 
                 if running_on_windows():
-                    aFile = aFile.replace("\\","/")       # we need to standardize the path separator so it works between platforms
-                aFile = cleanse_bytes(aFile, non_compliance_long_notation=escape_non_ascii)
+                    a_file = a_file.replace("\\","/")       # we need to standardize the path separator so it works between platforms
+                a_file = cleanse_bytes(a_file, non_compliance_long_notation=escape_non_ascii)
 
-                checksums.append([aFile, size, checksum])
+                inventory_items.append([a_file, size, checksum] + more)
             except Exception as err:
                 logger.error("Exception " + str(type(err)) + " while examining a file.", exc_info=True)
         if pool:
-            pool.apply_async(worker, (idx,aFile))
+            pool.apply_async(worker, (idx,a_file))
         else:
-            worker(idx,aFile)
+            worker(idx,a_file)
 
     if pool:
         pool.close()
         pool.join()
 
-    if len(checksums) != len(files):
-        raise Exception("It seems that not all worker jobs suceeded (%s vs %s)." % (len(checksums),len(files)))
+    if len(inventory_items) != len(files):
+        raise Exception("It seems that not all worker jobs suceeded (%s vs %s)." % (len(inventory_items),len(files)))
 
     # sort by the file names to make comparison easy
-    checksums = sorted(checksums, key=lambda f: f[0])
-    return checksums
+    inventory_items = sorted(inventory_items)
+    return inventory_items
 
 
 
@@ -344,10 +499,10 @@ def compare_inventories_inner(inventory1, inventory2, print_limit=5, callback=No
     """
     Compare two directory inventories, return a tuple (identical, problematic differences).
 
-    inventory1:     a result from directory_inventory(): a sorted list of (name,size,checksum) tuples for files in a directory
+    inventory1:     a result from directory_inventory(): a sorted list of (name,size,checksum[,date,dims]) tuples for files in a directory
     inventory2:     another object similar to the first
     print_limit:    limit how many differences to print
-    callback:       a function to invoke with two tuples (name,size,checksum), the first from 'inventory1', when a difference is found
+    callback:       a function to invoke with two tuples (name,size,checksum[,date,dims]), the first from 'inventory1', when a difference is found
     """
 
     logger.debug("The lengths of the inventories are (old) %s and (new) %s." % (len(inventory1),len(inventory2)))
@@ -361,14 +516,15 @@ def compare_inventories_inner(inventory1, inventory2, print_limit=5, callback=No
         idx1 = 0
         idx2 = 0
         while idx1 < len(inventory1) and idx2 < len(inventory2):
-            if inventory1[idx1][0] == inventory2[idx2][0]:
-                if inventory1[idx1] != inventory2[idx2]:   # remember: tuples != lists
-                    alldiffs += 1
-                    if not (callback and callback(inventory1[idx1],inventory2[idx2])):
-                        if(inventory1[idx1][1] != inventory2[idx2][1]):
-                            diffs0.append("Size mismatch for '%s' (oi=%s, ni=%s)." % (inventory1[idx1][0],idx1,idx2))
-                        elif(inventory1[idx1][2] != inventory2[idx2][2]):
-                            diffs0.append("Checksum mismatch for '%s' (oi=%s, ni=%s)." % (inventory1[idx1][0],idx1,idx2))
+            if inventory1[idx1][0] == inventory2[idx2][0]:               # the file name is the main thing
+                if inventory1[idx1] != inventory2[idx2]:
+                    alldiffs += 1                                        # we take a minor note of date/dim differences (plus size/checksum)
+                    if inventory1[idx1][0:3] != inventory2[idx2][0:3]:   # we want size & checksum to match (NOTE: list != tuple)
+                        if not (callback and callback(inventory1[idx1],inventory2[idx2])):
+                            if(inventory1[idx1][1] != inventory2[idx2][1]):
+                                diffs0.append("Size mismatch for '%s' (oi=%s, ni=%s)." % (inventory1[idx1][0],idx1,idx2))
+                            elif(inventory1[idx1][2] != inventory2[idx2][2]):
+                                diffs0.append("Checksum mismatch for '%s' (oi=%s, ni=%s)." % (inventory1[idx1][0],idx1,idx2))
                 idx1 += 1
                 idx2 += 1
             elif inventory1[idx1][0] > inventory2[idx2][0]:
@@ -480,6 +636,7 @@ def format_elapsed_seconds(elapsed, positive_ending="", negative_ending="ago"):
     """
 
     from numbers import Number
+    from math import floor, log
 
     if elapsed is None:
         return None
@@ -491,7 +648,7 @@ def format_elapsed_seconds(elapsed, positive_ending="", negative_ending="ago"):
     if type(elapsed) == float:
         if 0 < elapsed < 1:
             # provide 2 sig figures
-            formatter = "%0." + ("%02d" % (1 + (-1 * math.floor(math.log(elapsed,10.0))))) + "f"
+            formatter = "%0." + ("%02d" % (1 + (-1 * floor(log(elapsed,10.0))))) + "f"
         else:
             # provide one decimal place, note for any reasonable elapsed time the result number isn't large
             formatter = "%.01f"
@@ -705,29 +862,6 @@ def write_json(out_path, some_object):
     with open(out_path,'wb') as fh:
         txt = json.dumps(some_object, indent=2, ensure_ascii=False)    # indent: formatted JSON so people can read it
         fh.write(txt.encode('utf-8-sig'))
-        
-        
-        
-        
-def check_image(filename):
-    """
-    Check that the given file is a loadable image, if it is an image.
-    
-    Raises an exception if there is a problem.
-    """
-    
-    if not args.test_load_images:
-        return
-
-    _, ext = os.path.splitext(filename.lower())
-    if ext in checkable_image_files:   # will prevent accepting a corrupted file
-        try:
-            assert Image.open(filename), "False-ey result from loading image."
-            logger.debug("  Image %s could be loaded." % filename)
-        except (IOError,ValueError,AssertionError) as err:
-            txt = str(err) or str(type(err))
-            logger.warning("Exception suggestive of an invaid image while loading %s: %s" % (filename,txt))
-            raise
 
 
 
@@ -842,7 +976,7 @@ def compare_inventories(old_inventory, inventory):
             if item in inventory:
                 raise Exception("Trying to add something to the inventory that exists already, must be programmer error.")
             inventory.append(item)
-        inventory = sorted(inventory, key=lambda f: f[0])
+        inventory = sorted(inventory)
 
     return identical_invs, problems, inventory
 
@@ -881,7 +1015,6 @@ def process_one_directory(d):
             remove_directory = True,
             recursive        = False,
             filter_func      = our_filter_func,
-            worker_callback  = lambda x,y,z: check_image(x),
             escape_non_ascii = False,
             parallel         = (not args.single_thread)
         )
@@ -891,8 +1024,8 @@ def process_one_directory(d):
         if et > 2:
             etstr = format_elapsed_seconds(et)
             size = 0
-            for _, file_size, _ in inventory:
-                size += file_size
+            for bits in inventory:
+                size += bits[1]
             szstr = format_bytes(size)
             logger.info("Spent %s on %s of files (%0.01f MB/sec)." % (etstr,szstr,(size/(1024.0*1024.0*et))))
 
@@ -907,7 +1040,7 @@ def process_one_directory(d):
                 identical_invs = False
                 problems = True
             else:
-                old_inventory = sorted([x for x in old_inventory if our_filter_func(x[0],countas=0)], key=lambda f: f[0])  # applies the current filter to the old inventory
+                old_inventory = sorted([x for x in old_inventory if our_filter_func(x[0],countas=0)])  # applies the current filter to the old inventory
                 identical_invs, problems, revised_inventory = compare_inventories(old_inventory, inventory)
                 if revised_inventory == inventory:
                     logger.debug("The new inventory was not revised via patching.")
@@ -953,8 +1086,8 @@ def process_all_subdirectories(d, summary):
     if not happy:
         summary['failed paths'].append(d)
 
-    for aFile in os.listdir(d):
-        fullFile = os.path.join(d, aFile)
+    for a_file in os.listdir(d):
+        fullFile = os.path.join(d, a_file)
         if os.path.isdir(fullFile):
             process_all_subdirectories(fullFile, summary)
 
@@ -967,9 +1100,8 @@ def summarize_duplicates():
 
     ids_to_dirs = defaultdict(lambda: [])
     for dir,inventory in all_inventories.items():
-        for _, size, checksum in inventory:
-            key = (size,checksum)
-            ids_to_dirs[key].append(dir)
+        for bits in inventory:
+            ids_to_dirs[tuple(bits[1:2])].append(dir)   # size, checksum
 
     dir_duplicate_counts = defaultdict(lambda: 0)
     for dirs in ids_to_dirs.values():
@@ -1004,7 +1136,6 @@ def main():
     group.add_argument('--replace-inventory-files', help='replace inventory files without considering their correctness', action="store_true")
     parser.add_argument('--patch-approve-add', metavar='CSV', type=csv, help='one or more file extensions (with leading dots, CSV list, case-insensitive) to approve adding to existing inventories without promting, valid in the --patch and ---create-and-check modes')
     parser.add_argument('--patch-approve-remove', metavar='CSV', type=csv, help='one or more file extensions (with leading dots, CSV list, case-insensitive) to approve removing from existing inventories without promting, valid in the --patch and --create-and-check modes')
-    parser.add_argument('--test-load-images', help='attempt to load cetain images to see if they appear to be valid', action="store_true")
     parser.add_argument('--also-non-image-files', help='include almost any file in the inventory (by default, only common image formats are included)', action="store_true")
     parser.add_argument('--inventory-file-name', metavar='NAME', help='the name of the per-directory inventory file, without path (default: %(default)s)', default="inventory.json")
     parser.add_argument('--single-thread', help='process using only one thread (by default, uses one thread per CPU thread, up to 4)', action="store_true")

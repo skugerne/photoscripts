@@ -7,107 +7,17 @@ This script is therefore intended to be run after inventory.py has gone around m
 '''
 
 import os
-import argparse
-import glob
+import argparse, glob
 import logging
-import re
-from datetime import datetime
 
 # import from our other scripts
-from inventory import setup_logger, load_json, write_json
+from inventory import setup_logger, load_json, write_json, parse_dim_str, InventoryItem
 
 
 
 # globals
 logger = None
 args = None
-current_year = datetime.now().year
-
-
-
-def parse_date_str(datestr):
-    """
-    Parse a date string into a tuple.  Currently ignores timezone.  Rejects obviously incorrect values.
-    """
-
-    if not datestr:
-        return None
-
-    # ex: b'2005-06-27T09:56:05-04:00'
-    # ex: b'2006:05:22 19:17:28\x00'
-    m = re.match(rb"^(\d\d\d\d)[:-](\d\d)[:-](\d\d)[T ](\d\d):(\d\d):(\d\d)Z?(\000|[+-]\d\d:\d\d)?$",datestr)
-    if not m:
-        logger.warning("Failed to parse: %s" % datestr)
-        return None
-
-    res = tuple(int(m.group(x+1)) for x in range(6))
-    bounds = ((1998,current_year), (1,12), (1,31), (0,24), (0,59), (0,59))    # anything before the year 1998 is considered obviously incorrect
-    for idx in range(6):
-        if res[idx] < bounds[idx][0] or res[idx] > bounds[idx][1]:
-            return None   # ignore obviously incorrect dates
-
-    return res
-
-
-
-def parse_dim_str(dimstr):
-    """
-    Convert size string to a tuple.
-    """
-
-    if not dimstr:
-        return None
-
-    m = re.match(r"^(\d+)x(\d+)$",dimstr)
-    if not m:
-        raise ValueError("Unable to parse dimentions string.")
-    return int(m.group(0)), int(m.group(1))
-
-
-
-class InventoryItem():
-    """
-    Class to parse an inventory entry for a file, for cases where fancy code is called for.
-    """
-
-    def __init__(self, bits):
-        self.name = bits[0]                       # with or without path
-        self.size = bits[1]                       # bytes, int
-        self.checksum = bits[2]                   # checksum, by default sha256 hex digest in lower case
-        if len(bits) == 5:
-            self.date = parse_date_str(bits[3])   # "2000-01-01 01:01:01" or a limited number of variations on that
-            self.dims = parse_dim_str(bits[4])    # "WxH"
-        else:
-            self.date = None
-            self.dims = None
-
-    def as_tuple(self,):
-        """
-        Return a 3- or 5-element tuple (name, size, checksum) optionally with (date, dims)
-        """
-        if self.date and self.dims:
-            dt = "%04d-%02d-%02d %02d:%02d:%02d" % self.date
-            sz = "%dx%d" % self.dims
-            return (self.name, self.size, self.checksum, dt, sz)
-        return (self.name, self.size, self.checksum)
-
-    def __lt__(self, other):
-        return (self.name, self.size, self.checksum) < (other.name, other.size, other.checksum)
-
-    def __le__(self, other):
-        return (self.name, self.size, self.checksum) <= (other.name, other.size, other.checksum)
-
-    def __eq__(self, other):
-        return (self.name, self.size, self.checksum) == (other.name, other.size, other.checksum)
-
-    def __ne__(self, other):
-        return (self.name, self.size, self.checksum) != (other.name, other.size, other.checksum)
-
-    def __gt__(self, other):
-        return (self.name, self.size, self.checksum) > (other.name, other.size, other.checksum)
-
-    def __ge__(self, other):
-        return (self.name, self.size, self.checksum) >= (other.name, other.size, other.checksum)
 
 
 
