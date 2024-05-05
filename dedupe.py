@@ -43,9 +43,9 @@ def process_one_dir(path, directory_summary):
         if os.path.exists(invpath) and os.path.isfile(invpath):
             contents = load_json(invpath)
             for idx in range(len(contents)):
-                name,size,checksum = contents[idx]
-                name = os.path.join(path,name)           # enhance the file paths with the directory
-                contents[idx] = name,size,checksum
+                name,*more = contents[idx]         # not concerned about what the inventory says about the file, except the first element should be the name
+                name = os.path.join(path,name)     # enhance the file paths with the directory
+                contents[idx] = name,*more
             delete_dir_tracking[path]['total'] = len(contents)
             directory_summary['count'] += 1
             directory_summary['inventories'].append(path)
@@ -87,7 +87,7 @@ def find_dupes(inventory):
     to_delete = []
 
     keys_to_names = defaultdict(lambda: [])
-    for path,size,checksum in inventory:
+    for path,size,checksum,*more in inventory:
         key = (size,checksum)
         keys_to_names[key].append(path)
 
