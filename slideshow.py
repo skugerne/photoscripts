@@ -37,14 +37,24 @@ def load_inventories():
     newlist = list()
 
     for f in args.inventory_files:
+        invpathpart, _ = os.path.split(f)
         contents = load_json(f)
+        logger.info("Inventory file contains %d items." % len(contents))
         for item in contents:
-            if len(item) != 5:
+            if len(item) != 5:       # we want info about suitable image files, not non-image files
                 continue
-            if item[2] in checksums:
+            if not item[3]:          # there can be entries with missing dates, which we can't use here
+                continue
+            if item[2] in checksums: # there can be duplicates
                 continue
             checksums.add(item[2])
-            newitem = (parse_date_str(item[3]), item[0])
+            pathpart,filepart = os.path.split(item[0])
+            if invpathpart and not pathpart:
+                filepath = os.path.join(invpathpart,filepart)
+            else:
+                filepath = item[0]
+            assert os.path.isfile(filepath), "The path %s is not a file." % filepath
+            newitem = (parse_date_str(item[3]), filepath)
             newlist.append(newitem)
 
     return sorted(newlist)
