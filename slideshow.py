@@ -18,161 +18,40 @@ from random import choice
 from threading import Thread, Condition
 
 # import from our other files
-from inventory import setup_logger, load_json, write_json
+from inventory import setup_logger, load_json, parse_date_str, parse_dim_str
 
 
 
 # globals
 logger = None
 args = None
-current_year = datetime.now().year
 
 
 
-def parsedate(datestr):
+def load_inventories():
     """
-    Parse a date string (as raw bytes) into a tuple.
-    """
-
-    if not datestr:
-        return None
-
-    # ex: b'2005-06-27T09:56:05-04:00'
-    # ex: b'2006:05:22 19:17:28\x00'
-    m = re.match(rb"^(\d\d\d\d)[:-](\d\d)[:-](\d\d)[T ](\d\d):(\d\d):(\d\d)(\000|[+-]\d\d:\d\d)?$",datestr)
-    if not m:
-        logger.warning("Failed to parse: %s" % datestr)
-        return None
-
-    res = tuple(int(m.group(x+1)) for x in range(6))
-    bounds = ((2000,current_year), (1,12), (1,31), (0,24), (0,59), (0,59))
-    for idx in range(6):
-        if res[idx] < bounds[idx][0] or res[idx] > bounds[idx][1]:
-            return None   # ignore obviously incorrect dates
-
-    return res
-
-
-
-def load_database():
-    """
-    Load the database file, return the contents if sucessful.  If the directories in the fle do not match expectations, return nothing.
+    Load the inventory files and merge the contents.  Filter unusable content.
     """
 
-    if not (os.path.exists(args.database_name) and os.path.isfile(args.database_name)):
-        return None
+    checksums = set()
+    newlist = list()
 
-    try:
-        contents = load_json(args.database_name)
-        if contents['directories'] != sorted(args.directories):
-            logger.warning("The directories in the database do not match the parameters, building new database.")
-            return None
-        
-        if not contents['images']:
-            logger.warning("The database constains no images, building new database.")
-            return None
-        
-        return contents
-    except Exception as err:
-        logger.error("Failed to load: %s" % args.database_name)
-        logger.debug(err, exc_info=True)
-        return None
+    for f in args.inventory_files:
+        contents = load_json(f)
+        for item in contents:
+            if len(item) != 5:
+                continue
+            if item[2] in checksums:
+                continue
+            checksums.add(item[2])
+            newitem = (parse_date_str(item[3]), item[0])
+            newlist.append(newitem)
+
+    return sorted(newlist)
 
 
 
-def convert_props_for_image(dt,sz):
-    """
-    Convert date and size strings to the formats we want.  Assumes both values are True-ey strings.
-    """
-
-    dt = parsedate(dt.encode('ascii'))
-
-    m = re.match(r"^(\d+)x(\d+)$",sz)
-    if not m:
-        return None,None
-    sz = int(m.group(0)) * int(m.group(1))
-
-    return dt,sz
-
-
-
-def get_props_for_image(path):
-    """
-    Find a date and image dimentions in the image EXIF data.
-    
-    Return a tuple of (the date as a 6-element tuple), (pixel count).
-    """
-
-    with Image.open(path) as imgobj:
-        if 'exif' in imgobj.info:
-            exif_dict = piexif.load(imgobj.info['exif'])
-        else:
-            logger.warning("Failed to read exif: %s" % path)
-            return None,None
-        
-        try:
-            dt = parsedate(exif_dict["0th"].get(piexif.ImageIFD.DateTime))
-            dt = dt or parsedate(exif_dict["Exif"].get(piexif.ExifIFD.DateTimeOriginal))
-            dt = dt or parsedate(exif_dict["Exif"].get(piexif.ExifIFD.DateTimeDigitized))
-            dt = dt or None
-
-            x, y = imgobj.size
-            if y > x:
-                logger.info("img %d x %d" % (x,y))
-            sz = x * y or None
-
-            return dt,sz
-        except KeyError:
-            logger.warning("Failed to read exif (missing key): %s" % path)
-            return None,None
-
-
-
-def process_one_dir(path, directory_summary):
-    """
-    Return inventory contents for the given path, if there is an inventory file.
-    """
-
-    logger.info("Process path: %s" % path)
-
-    invpath = os.path.join(path,args.inventory_file_name)
-    try:
-        if os.path.exists(invpath) and os.path.isfile(invpath):
-            contents = load_json(invpath)
-            filtered_contents = []
-            directory_summary['count'] += 1
-            directory_summary['inventories'].append(path)
-            for line in contents:
-                if len(line) == 3:
-                    name = line[0]                     # ignore checksum and byte-size from the inventory file
-                    dt,sz = None,None                  # short inventory format lacks date and size
-                else:
-                    name,_,_,dt,sz = line              # extended inventory format has date and size
-                name = os.path.join(path,name)
-                if name.lower().endswith(".jpg"):      # only jpg images
-                    if dt and sz:                      # skip looking at the image header if we can
-                        dt,sz = convert_props_for_image(dt,sz)
-                    if not (dt and sz):
-                        dt,sz = get_props_for_image(name)
-                    if dt and sz and sz > 1600*1200:   # only images with date, size metadata, and of a certain min resolution
-                        filtered_contents.append((dt,name))
-    except OSError as err:
-        logger.warning("Failed to read an inventory file.")
-        logger.debug(err,exc_info=True)
-        directory_summary['errors'] += 1
-        filtered_contents = []
-
-    if args.recursive:
-        for thing in os.listdir(path):
-            thing = os.path.join(path, thing)
-            if os.path.isdir(thing):
-                filtered_contents += process_one_dir(thing, directory_summary)
-
-    return filtered_contents
-
-
-
-def select_image_subset(database_content):
+def select_image_subset(image_info_list):
     """
     Select a subset of images to show.  Return a tuple: (paths, dict() mapping the paths to date tuples)
     """
@@ -180,7 +59,7 @@ def select_image_subset(database_content):
     # group by year, month
     grouped = defaultdict(lambda: [])
     path_to_date = dict()
-    for dt,path in database_content['images']:
+    for dt,path in image_info_list:
         grouped[(dt[0],dt[1])].append((dt,path))
         path_to_date[path] = tuple(dt)
 
@@ -212,14 +91,14 @@ def select_image_subset(database_content):
 
 
 
-def more_images(current_idx, current_paths, path_to_date, database_content):
+def more_images(current_idx, current_paths, path_to_date, image_info_list):
     """
     Extend the subset of images to show, centered on the given image.  Return the new index and paths.
     """
 
     # arrange images by dates (which are 6-element tuples)
     dt_to_paths = defaultdict(lambda: [])
-    for dt,path in database_content['images']:
+    for dt,path in image_info_list:
         dt_to_paths[tuple(dt)].append(path)
 
     # get all possible dates in a list sorted list
@@ -248,7 +127,7 @@ def more_images(current_idx, current_paths, path_to_date, database_content):
 
     # find nearby images that we don't already have
     working_dt_idx_offset = 1
-    while len(added) < 20 and len(added) + len(current_paths) < len(database_content['images']):
+    while len(added) < 20 and len(added) + len(current_paths) < len(image_info_list):
         addfunc(dt_index - working_dt_idx_offset)
         addfunc(dt_index + working_dt_idx_offset)
         working_dt_idx_offset += 1
@@ -470,10 +349,10 @@ def text_box(text, textcolor, backgroundcolor):
 
 
 
-def start_show(database_content):
+def start_show(image_info_list):
     logger.info("Start.")
 
-    paths,path_to_date = select_image_subset(database_content)
+    paths,path_to_date = select_image_subset(image_info_list)
 
     pygame.init()
     pygame.display.init()
@@ -527,7 +406,7 @@ def start_show(database_content):
                     screen_res, screen_srf = apply_screen_setting(fullscreen)
                     cache.set_screen(screen_res)
                 elif event.key == pygame.K_m:       # add more nearby images
-                    idx,paths = more_images(idx,paths,path_to_date,database_content)
+                    idx,paths = more_images(idx,paths,path_to_date,image_info_list)
                     cache.set_paths(paths)
                 elif event.key == pygame.K_SPACE:
                     if direction: direction = 0     # toggle flipping pause
@@ -545,14 +424,10 @@ def main():
     global logger
 
     # parse arguments
-    parser = argparse.ArgumentParser(description='Make a semi-random slideshow from one or more directories or directory trees.')
-    parser.add_argument('--recursive', help='crawl all subpaths inside the given paths', action="store_true")
-    parser.add_argument('--refresh-database', help='rebuild the database file from inventory files (rebuild is automatic if the database is empty or is based on different base paths)', action="store_true")
-    parser.add_argument('--database-name', metavar='NAME', help='the name of a file to serve as a database of images to consider showing (default: %(default)s)', default="slideshow-db.json")
-    parser.add_argument('--inventory-file-name', metavar='NAME', help='the name of the inventory file to look for in each directory (default: %(default)s)', default="inventory.json")
+    parser = argparse.ArgumentParser(description='Make a semi-random slideshow from one or more inventory files.')
     parser.add_argument('--cache-count', metavar='NUM', type=int, help='how many images to load into RAM for rapid display (default: %(default)s)', default=100)
     parser.add_argument('--log', metavar='PATH', help='base log file name (default: %(default)s)', default="slideshow.log")
-    parser.add_argument('directories', metavar='DIR', nargs='+', help='directories to process')
+    parser.add_argument('inventory_files', metavar='FILE', nargs='+', help='one or more inventory files to show images from')
     args = parser.parse_args()
 
     # set up a standard logger object
@@ -566,40 +441,24 @@ def main():
     try:
         # on Windows, expand special characters (on Linux, would perhaps expand previously escaped characters)
         targets = []
-        for t in args.directories:
+        for t in args.inventory_files:
             globbed = glob.glob(t.rstrip(r'\/'))
             targets += globbed
-        args.directories = targets
+        args.inventory_files = targets
 
-        if not args.directories:
-            logger.error("No directories remain after glob-ing (remember sneaky pictures/bilder rename on Windows).")
+        if not args.inventory_files:
+            logger.error("No inventory files remain after glob-ing (remember sneaky pictures/bilder rename on Windows).")
             logger.error("The program can not continue.")
             exit(-1)
 
-        for d in args.directories:
-            if not os.path.isdir(d):
-                logger.error("The parameter '%s' is not a directory." % d)
+        for d in args.inventory_files:
+            if not os.path.isfile(d):
+                logger.error("The parameter '%s' is not a file." % d)
                 logger.error("The program can not continue.")
                 exit(-1)
 
-        if not args.refresh_database:
-            database_content = load_database()
-        else:
-            database_content = None
-
-        # FIXME: notice when the directories in the DB differ from the CLI options, also the --recursive flag
-
-        if args.refresh_database or not database_content:
-            directory_summary = {'count': 0, 'inventories': [], 'errors': 0}
-            database_content = {'directories': sorted(args.directories), 'images': []}
-            for d in args.directories:
-                database_content['images'] += process_one_dir(d, directory_summary)
-            logger.info("Found %d inventory files containing %d records." % (directory_summary['count'],len(database_content['images'])))
-            logger.info("Encountered %d errors loading inventories." % directory_summary['errors'])
-
-            write_json(args.database_name, database_content)
-
-        start_show(database_content)
+        image_info_list = load_inventories()
+        start_show(image_info_list)
 
     except Exception as err:
         logger.error("Exception " + str(type(err)) + " while working.", exc_info=True)
