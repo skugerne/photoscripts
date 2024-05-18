@@ -11,7 +11,7 @@ import argparse, glob
 import logging
 
 # import from our other scripts
-from inventory import setup_logger, load_json, write_json, parse_dim_str, InventoryItem
+from inventory import setup_logger, load_json, write_json, parse_dim_str, running_on_windows, InventoryItem
 
 
 
@@ -61,6 +61,8 @@ def process_one_dir(path, directory_summary):
                 if args.path_trim:                           # optionally remove parts of the path
                     assert item.name.startswith(args.path_trim), "Cannot trim: %s" % item.name
                     item.name = item.name[len(args.path_trim):]
+                if running_on_windows():
+                    item.name = item.name.replace("\\","/")  # we need to standardize the path separator so it works between platforms
 
                 if args.filter_dupes:
                     directory_summary['ids'].add((item.size, item.checksum))
@@ -91,7 +93,7 @@ def main():
     parser = argparse.ArgumentParser(description='Create one large inventory from small ones which are distributed in the various image directories.')
     parser.add_argument('--recursive', action="store_true", help='crawl all subpaths inside the given paths')
     parser.add_argument('--merged-inventory', metavar='NAME', help='a file to write the merged inventory to (default: %(default)s)', default="merged-inventory.json")
-    parser.add_argument('--path-trim', metavar='PATH', help='a component to remove from the front of paths written to the merged inventory')
+    parser.add_argument('--path-trim', metavar='PATH', help='a component to remove from the front of paths written to the merged inventory (if you intend to remove a final path separator, say so)')
     group = parser.add_mutually_exclusive_group()
     group.add_argument('--filter-include-name-endings', metavar='CSV', type=csv, help='one or more file name endings (case-insensitive) to include in the result')
     group.add_argument('--filter-exclude-name-endings', metavar='CSV', type=csv, help='one or more file name endings (case-insensitive) to exclude in the result')
