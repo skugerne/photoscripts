@@ -194,8 +194,9 @@ class ImageCache():
                                 best_idx = maybe_idx
 
                     if best_idx == None:
-                        logger.info("Everything seems to be cached (%d images in list, current idx %d)." % (len(self.paths),self.current_idx))
+                        logger.debug("Everything seems to be cached (%d images in list, current idx %d)." % (len(self.paths),self.current_idx))
                         assert len(self.image_cache) == len(self.paths), "Somehow not all images where cached when expected."
+                        self.thread = None
                         return
                     logger.debug("Maybe load idx %d?" % best_idx)
                     path = self.paths[best_idx]
@@ -267,6 +268,11 @@ class ImageCache():
         with self.image_cache_lock:
             self.current_idx = idx
             if idx not in self.image_cache:
+                if not self.thread:
+                    # if the background thread stopped (due to caching everything) start it again
+                    self.thread = Thread(target=self.worker)
+                    self.thread.daemon = True
+                    self.thread.start()
                 self.image_cache_lock.wait(0.05)
             return self.image_cache.get(idx)
 
@@ -468,6 +474,12 @@ def main():
                 exit(-1)
 
         image_info_list = load_inventories()
+
+        if not image_info_list:
+            logger.error("The inventory files do not contain any images.")
+            logger.error("The program can not continue.")
+            exit(-1)
+
         start_show(image_info_list)
 
     except Exception as err:
