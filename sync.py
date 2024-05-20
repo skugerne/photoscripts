@@ -9,7 +9,7 @@ The inventories must contain paths suitable for the commands.  Probably they wil
 import os
 import argparse
 import logging
-from inventory import setup_logger, load_json
+from inventory import setup_logger, load_json, format_bytes
 
 
 
@@ -24,6 +24,23 @@ class DoesNotExist(Exception):
 
 class DoesExist(Exception):
     pass
+
+
+def subset(inventory, subpath):
+    """
+    Return the inventory with files outside the given subpath removed.  The paths of other files are not modified.
+    """
+
+    if not subpath:
+        return inventory
+
+    new_inventory = []
+    for item in inventory:
+        path,*stuff = item
+        if path.startswith(subpath) and path != subpath:
+            new_inventory.append((path,*stuff))
+
+    return new_inventory
 
 
 
@@ -66,11 +83,20 @@ def do_work(inv1,inv2):
 
     inv1 = sorted(inv1)
     inv2 = sorted(inv2)
-    root1 = get_root_dir(inv1)
-    root2 = get_root_dir(inv2)
 
-    logger.info("The first location has shared root: %s" % root1)
-    logger.info("The second location has shared root: %s" % root2)
+    if args.subpath1:
+        root1 = args.subpath1
+    else:
+        root1 = get_root_dir(inv1)
+    if args.subpath2:
+        root2 = args.subpath2
+    else:
+        root2 = get_root_dir(inv2)
+
+    if root1:
+        logger.info("The first location has shared root: %s" % root1)
+    if root2:
+        logger.info("The second location has shared root: %s" % root2)
 
     first_second_copy_sizes = []
     second_first_copy_sizes = []
@@ -152,13 +178,13 @@ def do_work(inv1,inv2):
     while idx2 < len(inv2):
         path2,size2,checksum2 = inv2[idx2]
         path2b = path2[len(root2):]
-        second_missing(path2,path2b)
+        first_missing(path2,path2b)
         idx2 += 1
 
-    logger.info("Would cp %d files worth %d bytes from first to second." % (len(first_second_copy_sizes),sum(first_second_copy_sizes)))
-    logger.info("Would cp %d files worth %d bytes from second to first." % (len(second_first_copy_sizes),sum(second_first_copy_sizes)))
-    logger.info("Would rm %d files worth %d bytes from first." % (len(first_delete_sizes),sum(first_delete_sizes)))
-    logger.info("Would rm %d files worth %d bytes from second." % (len(second_delete_sizes),sum(second_delete_sizes)))
+    logger.info("Would cp %d files worth %s bytes from first to second." % (len(first_second_copy_sizes),format_bytes(sum(first_second_copy_sizes))))
+    logger.info("Would cp %d files worth %s bytes from second to first." % (len(second_first_copy_sizes),format_bytes(sum(second_first_copy_sizes))))
+    logger.info("Would rm %d files worth %s bytes from first." % (len(first_delete_sizes),format_bytes(sum(first_delete_sizes))))
+    logger.info("Would rm %d files worth %s bytes from second." % (len(second_delete_sizes),format_bytes(sum(second_delete_sizes))))
 
     return commands
 
@@ -178,6 +204,8 @@ def main():
     group = parser.add_mutually_exclusive_group(required=False)
     group.add_argument('--only-rm', help='only output rm commands (not compatible with --cp-both-ways)', action="store_true")
     group.add_argument('--overwrite-on-conflict', help='when the same file exists on both sides but with different properties, overwrite one with the other as directed by other parameters', action="store_true")
+    parser.add_argument('--subpath1', metavar='PATH', help='a subdirectory of the first inventory file to work with, by default the script can make a guess')
+    parser.add_argument('--subpath2', metavar='PATH', help='a subdirectory of the second inventory file to work with, by default the script can make a guess')
     parser.add_argument('--sync-command-file', metavar='NAME', help='a file to write a list of cp and rm commands to (default: %(default)s)', default="syncme.txt")
     parser.add_argument('--log', metavar='PATH', help='base log file name (default: %(default)s)', default="sync.log")
     parser.add_argument('inv1', metavar='INV', help='an inventory file to process')
@@ -199,6 +227,9 @@ def main():
             logger.error("Both inventory files must contain something.")
             logger.error("The program can not continue.")
             exit(-1)
+
+        inv1 = subset(inv1,args.subpath1)
+        inv2 = subset(inv2,args.subpath2)
 
         try:
             comlist = do_work(inv1,inv2)
