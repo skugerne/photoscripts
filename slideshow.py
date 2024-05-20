@@ -380,17 +380,17 @@ def start_show(image_info_list):
 
     fullscreen = False
     stop = False
-    specific_idx_chosen = True
+    new_idx_chosen = True
     idx = 0
     start_at = 0
     direction = 1
     flip_time = 2
     while not stop:
-        if specific_idx_chosen or time() - start_at > flip_time:
-            if not specific_idx_chosen:
+        if new_idx_chosen or time() - start_at > flip_time:
+            if not new_idx_chosen:
                 idx += direction
                 logger.debug("Increment/decrement image index to %d." % idx)
-                specific_idx_chosen = True
+                new_idx_chosen = True
             srf = cache.get_surface(idx)
             if srf:
                 logger.info("Show image #%d of %d." % (idx+1,len(paths)))
@@ -399,7 +399,7 @@ def start_show(image_info_list):
                 screen_srf.blit(txt_srf,(0,0))
                 pygame.display.flip()
                 start_at = time()
-                specific_idx_chosen = False
+                new_idx_chosen = False
             else:
                 logger.debug("Image #%d of %d not available yet." % (idx+1,len(paths)))
         else:
@@ -413,10 +413,10 @@ def start_show(image_info_list):
                     stop = True
                 elif event.key == pygame.K_LEFT:
                     idx -= 1
-                    specific_idx_chosen = True
+                    new_idx_chosen = True
                 elif event.key == pygame.K_RIGHT:
                     idx += 1
-                    specific_idx_chosen = True
+                    new_idx_chosen = True
                 elif event.key == pygame.K_UP:
                     flip_time += 1
                 elif event.key == pygame.K_DOWN:
