@@ -1,7 +1,7 @@
 # -*- encoding: UTF-8 -*-
 
 '''
-Make a semi-random slideshow from one or more directories or directory trees.
+Make a semi-random slideshow from one or more inventory files.
 '''
 
 import os
@@ -267,6 +267,7 @@ class ImageCache():
 
         with self.image_cache_lock:
             self.current_idx = idx
+            logger.debug("Set cache index to %d because of surface request." % self.current_idx)
             if idx not in self.image_cache:
                 if not self.thread:
                     # if the background thread stopped (due to caching everything) start it again
@@ -304,6 +305,7 @@ class ImageCache():
                 self.current_idx = paths.index(current_path)
             else:
                 self.current_idx = 0
+            logger.debug("Repoint cache index to %d while updating paths." % self.current_idx)
 
             overlap = set(self.paths).intersection(set(paths))
             logger.debug("There are %d images to carry over from the old cache." % len(overlap))
@@ -378,15 +380,17 @@ def start_show(image_info_list):
 
     fullscreen = False
     stop = False
-    manual = True
+    specific_idx_chosen = True
     idx = 0
     start_at = 0
     direction = 1
     flip_time = 2
     while not stop:
-        if manual or time() - start_at > flip_time:
-            if not manual:
+        if specific_idx_chosen or time() - start_at > flip_time:
+            if not specific_idx_chosen:
                 idx += direction
+                logger.debug("Increment/decrement image index to %d." % idx)
+                specific_idx_chosen = True
             srf = cache.get_surface(idx)
             if srf:
                 logger.info("Show image #%d of %d." % (idx+1,len(paths)))
@@ -395,7 +399,7 @@ def start_show(image_info_list):
                 screen_srf.blit(txt_srf,(0,0))
                 pygame.display.flip()
                 start_at = time()
-                manual = False
+                specific_idx_chosen = False
             else:
                 logger.debug("Image #%d of %d not available yet." % (idx+1,len(paths)))
         else:
@@ -409,10 +413,10 @@ def start_show(image_info_list):
                     stop = True
                 elif event.key == pygame.K_LEFT:
                     idx -= 1
-                    manual = True
+                    specific_idx_chosen = True
                 elif event.key == pygame.K_RIGHT:
                     idx += 1
-                    manual = True
+                    specific_idx_chosen = True
                 elif event.key == pygame.K_UP:
                     flip_time += 1
                 elif event.key == pygame.K_DOWN:
@@ -422,7 +426,9 @@ def start_show(image_info_list):
                     screen_res, screen_srf = apply_screen_setting(fullscreen)
                     cache.set_screen(screen_res)
                 elif event.key == pygame.K_m:       # add more nearby images
+                    logger.debug("Display idx before: %d (%s)" % (idx,paths[idx]))
                     idx,paths = more_images(idx,paths,path_to_date,image_info_list)
+                    logger.debug("Display idx after: %d (%s)" % (idx,paths[idx]))
                     cache.set_paths(paths)
                 elif event.key == pygame.K_SPACE:
                     if direction: direction = 0     # toggle flipping pause
