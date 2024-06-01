@@ -1,5 +1,3 @@
-# -*- encoding: UTF-8 -*-
-
 '''
 Make a semi-random slideshow from one or more inventory files.
 '''
@@ -9,7 +7,7 @@ import argparse
 import glob, re
 import logging
 from collections import defaultdict
-import pygame
+import pygame    # requires at least version 2.1.3
 import piexif
 from PIL import Image
 from time import sleep, time
@@ -28,7 +26,7 @@ args = None
 
 
 
-def load_inventories():
+def load_inventories(inventory_files):
     """
     Load the inventory files and merge the contents.  Filter unusable content.
     """
@@ -36,7 +34,7 @@ def load_inventories():
     checksums = set()
     newlist = list()
 
-    for f in args.inventory_files:
+    for f in inventory_files:
         invpathpart, _ = os.path.split(f)
         contents = load_json(f)
         logger.info("Inventory file contains %d items." % len(contents))
@@ -157,11 +155,12 @@ def more_images(current_idx, current_paths, path_to_date, image_info_list):
 
 
 class ImageCache():
-    def __init__(self, screen_res, paths):
+    def __init__(self, screen_res, paths, cache_count):
         self.screen_res = screen_res      # tuple for the resolution to cache images at
         self.paths = paths                # paths to image files, sorted by date (but the date is not provided here)
         self.path_to_idx = dict((p,i) for i,p in enumerate(paths))
         self.run = True
+        self.cache_count = cache_count
 
         self.image_cache = dict()         # map indexes of cached images to pygame surfaces
         self.current_idx = 0
@@ -202,18 +201,17 @@ class ImageCache():
                     path = self.paths[best_idx]
 
                     # clean up the cache
-                    if len(self.image_cache) > args.cache_count and worst_score > best_score+1:
+                    if len(self.image_cache) > self.cache_count and worst_score > best_score+1:
                         logger.debug("Unload idx %d." % worst_idx)
                         assert worst_idx != None, "Somehow the worst index was not set."
                         assert worst_idx != best_idx, "Somehow the best and worst indexes match."
                         del self.image_cache[worst_idx]
 
-                if len(self.image_cache) <= args.cache_count+1:
+                if len(self.image_cache) <= self.cache_count+1:
 
                     # load an image
                     logger.info("Load: %s" % path)
                     with Image.open(path) as imgobj:
-                        oval = 1
                         exif_dict = piexif.load(imgobj.info['exif'])    # should not be here without usable EXIF
                         oval = exif_dict["0th"].get(piexif.ImageIFD.Orientation)
                         logger.debug("Orientation value: %s" % oval)
@@ -224,6 +222,9 @@ class ImageCache():
                         elif oval == 8:
                             # rotate 90 CCW
                             srf = pygame.transform.rotate(srf,90)
+                        elif oval == 3:
+                            # rotate 180
+                            srf = pygame.transform.rotate(srf,180)
                     wid,hig = srf.get_size()
 
                     with self.image_cache_lock:
@@ -247,6 +248,7 @@ class ImageCache():
                         if path in self.path_to_idx:
                             idx = self.path_to_idx[path]
                             self.image_cache[idx] = blksrf
+                            logger.debug("Add loaded image idx %d to the cache." % idx)
 
                             # let the main thread know, in case its waiting
                             self.image_cache_lock.notify_all()
@@ -352,12 +354,12 @@ def apply_screen_setting(fullscreen):
 
 
 
-def text_box(text, textcolor, backgroundcolor):
+def text_box(text, textcolor, backgroundcolor, size=28):
     """
     Create a surface with text on it.
     """
 
-    font = pygame.font.Font(pygame.font.get_default_font(), 28)
+    font = pygame.font.Font(pygame.font.get_default_font(), size)
     spacing = 4
     text_surface = font.render(text, True, textcolor, backgroundcolor)
     text_surface_2 = pygame.surface.Surface((text_surface.get_size()[0]+spacing*2,text_surface.get_size()[1]+spacing*2))
@@ -376,7 +378,7 @@ def start_show(image_info_list):
     pygame.display.init()
     screen_res, screen_srf = apply_screen_setting(False)
 
-    cache = ImageCache(screen_res, paths)
+    cache = ImageCache(screen_res, paths, args.cache_count)
 
     fullscreen = False
     stop = False
@@ -397,6 +399,8 @@ def start_show(image_info_list):
                 screen_srf.blit(srf,(0,0))
                 txt_srf = text_box("%04d-%02d-%02d" % tuple(path_to_date[paths[idx]][0:3]), (255,255,255), (0,0,0))
                 screen_srf.blit(txt_srf,(0,0))
+                txt_srf2 = text_box("%d of %d" % (idx+1,len(paths)), (150,150,220), (0,0,0), size=16)
+                screen_srf.blit(txt_srf2,(0,txt_srf.get_height()))
                 pygame.display.flip()
                 start_at = time()
                 new_idx_chosen = False
@@ -479,7 +483,7 @@ def main():
                 logger.error("The program can not continue.")
                 exit(-1)
 
-        image_info_list = load_inventories()
+        image_info_list = load_inventories(args.inventory_files)
 
         if not image_info_list:
             logger.error("The inventory files do not contain any images.")
