@@ -16,7 +16,7 @@ from random import choice
 from threading import Thread, Condition
 
 # import from our other files
-from inventory import setup_logger, load_json, parse_date_str, parse_dim_str
+from inventory import setup_logger, load_json, InventoryItem
 
 
 
@@ -26,9 +26,9 @@ args = None
 
 
 
-def load_inventories(inventory_files):
+def load_inventories(inventory_files, remove_dupes=True):
     """
-    Load the inventory files and merge the contents.  Filter unusable content.
+    Load the inventory files and merge the contents.  Filter unusable content.  Return list of InventoryItem sorted oldest first.
     """
 
     checksums = set()
@@ -39,23 +39,27 @@ def load_inventories(inventory_files):
         contents = load_json(f)
         logger.info("Inventory file contains %d items." % len(contents))
         for item in contents:
-            if len(item) != 5:       # we want info about suitable image files, not non-image files
+            if len(item) != 5:           # we want info about suitable image files, not non-image files
                 continue
-            if not item[3]:          # there can be entries with missing dates, which we can't use here
+            if not item[3]:              # there can be entries with missing dates, which we can't use here
                 continue
-            if item[2] in checksums: # there can be duplicates
-                continue
-            checksums.add(item[2])
+            if item[0].lower().endswith(".cr2"):
+                continue                 # not sure if raw images have the EXIF data anyway, but skip them in case they do
+            if remove_dupes:
+                if item[2] in checksums: # there can be duplicates
+                    continue
+                checksums.add(item[2])
+
+            newitem = InventoryItem(item)
             pathpart,filepart = os.path.split(item[0])
             if invpathpart and not pathpart:
-                filepath = os.path.join(invpathpart,filepart)
+                newitem.name = os.path.join(invpathpart,filepart)
             else:
-                filepath = item[0]
-            assert os.path.isfile(filepath), "The path %s is not a file." % filepath
-            newitem = (parse_date_str(item[3]), filepath)
+                newitem.name = item[0]
+            assert os.path.isfile(newitem.name), "The path %s is not a file." % newitem.name
             newlist.append(newitem)
 
-    return sorted(newlist)
+    return sorted(newlist, key=lambda x: (x.date,x.name))    # sort by date, oldest first
 
 
 
@@ -67,7 +71,9 @@ def select_image_subset(image_info_list):
     # group by year, month
     grouped = defaultdict(lambda: [])
     path_to_date = dict()
-    for dt,path in image_info_list:
+    for image_info in image_info_list:    # InventoryItem objects
+        dt = image_info.date
+        path = image_info.name
         grouped[(dt[0],dt[1])].append((dt,path))
         path_to_date[path] = tuple(dt)
 
@@ -106,8 +112,8 @@ def more_images(current_idx, current_paths, path_to_date, image_info_list):
 
     # arrange images by dates (which are 6-element tuples)
     dt_to_paths = defaultdict(lambda: [])
-    for dt,path in image_info_list:
-        dt_to_paths[tuple(dt)].append(path)
+    for image_info in image_info_list:    # InventoryItem objects
+        dt_to_paths[tuple(image_info.date)].append(image_info.name)
 
     # get all possible dates in a list sorted list
     all_date_list = sorted(dt_to_paths.keys())
