@@ -4,16 +4,12 @@ Compare two inventory files (which may be single- or multi-directory) and show w
 
 import os
 import argparse
-import glob, re
+import glob
 import logging
 from collections import defaultdict
 import pygame    # requires at least version 2.1.3
-import piexif
-from PIL import Image
+from math import sin,cos
 from time import sleep, time
-from datetime import datetime
-from random import choice
-from threading import Thread, Condition
 
 # import from our other files
 from inventory import setup_logger, load_json, parse_date_str, parse_dim_str
@@ -44,6 +40,23 @@ def build_date_checksum_list(image_info_list):
     for k in checksum_to_idx.keys():
         checksum_to_idx2[k] = sorted(checksum_to_idx[k])
     return image_list, checksum_to_idx2
+
+
+
+def loading_image(dims):
+    """
+    Return a surface of the given dimentions which indicates a missing image.
+    """
+
+    rotation = int(time() * 32) % 32 + 3
+    surf = pygame.Surface(dims)
+    anglestep = 3.141529 * 2 / rotation
+    radius = 0.4*min(dims)
+    coords = tuple((dims[0]/2+radius*sin(r*anglestep),dims[1]/2+radius*cos(r*anglestep)) for r in range(rotation))
+    pygame.draw.lines(surf, (0,255,0), True, coords)
+    txt_srf = text_box("loading", (150,150,220), (0,0,0), size=16)
+    surf.blit(txt_srf,((dims[0]-txt_srf.get_width())/2,(dims[1]-txt_srf.get_height())/2))
+    return surf
 
 
 
@@ -97,29 +110,56 @@ class ImageRow():
 
     def set_idx(self, idx):
         """
-        Show the image with the given checksum, or a placeholder if it is missing.
+        Set the given image to be the main one.  The given idx refers to unique-checkum-files in the merged inventories.
         """
-        for idx in range(len(self.surfaces)):
-            pass
+
+        diff = idx - self.idx
+        if not diff:
+            return
+        
+        new_surfaces = [None] * self.num_surfaces
+        for old_idx in range(len(self.surfaces)):
+            new_idx = old_idx - diff
+            if new_idx >= 0 and new_idx < self.num_surfaces:
+                new_surfaces[new_idx] = self.surfaces[old_idx]
+
+        self.surfaces = new_surfaces
+        self.idx = idx
+
+    def have_idx(self, idx):
+        # FIXME: make a correct determination
+        return True
 
     def display(self):
         """
         Blit images to screen.
         """
 
+        # determine if there are any images that are newly available
         for idx in range(self.num_surfaces):
-            logger.info("Draw surface %d." % idx)
+            if self.have_idx(idx+self.idx) and not self.surfaces[idx]:
+                srf = self.cache.get_surface(idx+self.idx, delay=0)
+                if srf:
+                    logger.info("Got an image.")
+                    self.surfaces[idx] = srf
+                else:
+                    logger.info("Did not get a surface for idx %s." % idx)
+
+        # show images
+        for idx in range(self.num_surfaces):
+            logger.debug("Draw surface %d." % idx)
             corn = self.surface_corn[idx]
             if idx == 3:
                 dims = self.main_dims
             else:
                 dims = self.small_dims
             if self.surfaces[idx]:
+                # FIXME: scale correctly
                 srf = self.surfaces[idx]
             elif idx == 3:
-                srf = self.main_missing
+                srf = loading_image(self.main_dims) if self.have_idx(idx+self.idx) else self.main_missing
             else:
-                srf = self.small_missing
+                srf = loading_image(self.small_dims) if self.have_idx(idx+self.idx) else self.small_missing
             self.screen_srf.blit(srf,corn)
             p = (
                 corn,
@@ -150,10 +190,12 @@ def start_show(image_info_list_1, image_info_list_2):
     idx = 0
     while not stop:
         if new_idx_chosen:
+            logger.info("Update chosen image.")
             upper_row.set_idx(idx)
             lower_row.set_idx(idx)
             new_idx_chosen = False
         else:
+            logger.debug("Display.")
             upper_row.display()
             lower_row.display()
             pygame.display.flip()
@@ -192,7 +234,7 @@ def main():
     # parse arguments
     parser = argparse.ArgumentParser(description='Compare two inventory files (which may be single- or multi-directory) and show which images differ between them.')
     parser.add_argument('--cache-count', metavar='NUM', type=int, help='how many images to load into RAM for rapid display (default: %(default)s)', default=100)
-    parser.add_argument('--log', metavar='PATH', help='base log file name (default: %(default)s)', default="slideshow.log")
+    parser.add_argument('--log', metavar='PATH', help='base log file name (default: %(default)s)', default="diff.log")
     parser.add_argument('inventory_file_1', metavar='FILE', help='an inventory file to show images from')
     parser.add_argument('inventory_file_2', metavar='FILE', help='an inventory file to show images from')
     args = parser.parse_args()
