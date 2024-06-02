@@ -1,5 +1,3 @@
-# -*- encoding: UTF-8 -*-
-
 '''
 Create one large inventory from small ones which are distributed in the various image directories.
 

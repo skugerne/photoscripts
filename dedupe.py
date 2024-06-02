@@ -1,5 +1,3 @@
-# -*- encoding: UTF-8 -*-
-
 '''
 Help cleanup (or understanding) in situations where images are duplicated under different names.
 
