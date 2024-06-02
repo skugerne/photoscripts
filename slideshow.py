@@ -268,9 +268,9 @@ class ImageCache():
             logger.error("Error in background thread.")
             logger.error(err,exc_info=True)
 
-    def get_surface(self, idx):
+    def get_surface(self, idx, delay=0.05):
         """
-        Attempt to get the image surface, return None after a short delay if not found.
+        Attempt to return the image surface, return None after the given delay if not currently available.
         """
 
         with self.image_cache_lock:
@@ -282,7 +282,8 @@ class ImageCache():
                     self.thread = Thread(target=self.worker)
                     self.thread.daemon = True
                     self.thread.start()
-                self.image_cache_lock.wait(0.05)
+                if delay:
+                    self.image_cache_lock.wait(delay)
             return self.image_cache.get(idx)
 
     def set_screen(self, screen_res):
