@@ -161,8 +161,8 @@ def more_images(current_idx, current_paths, path_to_date, image_info_list):
 
 
 class ImageCache():
-    def __init__(self, screen_res, paths, cache_count):
-        self.screen_res = screen_res      # tuple for the resolution to cache images at
+    def __init__(self, resolutions, paths, cache_count):
+        self.resolutions = resolutions    # tuple or list/tuple of tuples for the resolution(s) to cache images at
         self.paths = paths                # paths to image files, sorted by date (but the date is not provided here)
         self.path_to_idx = dict((p,i) for i,p in enumerate(paths))
         self.run = True
@@ -176,7 +176,19 @@ class ImageCache():
         self.thread.daemon = True
         self.thread.start()
 
+    def multiple_resolutions(self):
+        """
+        Return True if the image cache will contain single surfaces for each image, False if it will contain a list of them (also a 1-element list).
+        """
+
+        assert self.resolutions, "The resolutions cannot be False-ey."
+        return not bool(len(self.resolutions) == 2 and type(self.resolutions[0]) in (int,float) and type(self.resolutions[1]) in (int,float))
+
     def worker(self):
+        """
+        Function to invoke from a background thread.  Runs until all images are cached.
+        """
+
         try:
             while self.run:
                 with self.image_cache_lock:
@@ -234,26 +246,38 @@ class ImageCache():
                     wid,hig = srf.get_size()
 
                     with self.image_cache_lock:
-                        # we'll be doing some work with the lock held because the screen res can be changed on us
+                        # we'll be doing some work with the lock held because the output res can be changed on us
 
-                        widr = wid / self.screen_res[0]
-                        higr = hig / self.screen_res[1]
-                        if widr >= higr:
-                            # too wide, black bars top & bottom (or perfect fit)
-                            scale_res = (self.screen_res[0],self.screen_res[1]*(higr/widr))
-                            paste_at = (0,(self.screen_res[1]-scale_res[1])/2)
+                        single_result = not self.multiple_resolutions()
+                        if single_result:
+                            resolutions = [self.resolutions]
                         else:
-                            # too tall, black bars left & right
-                            scale_res = (self.screen_res[0]*(widr/higr),self.screen_res[1])
-                            paste_at = ((self.screen_res[0]-scale_res[0])/2,0)
-                        srf = pygame.transform.smoothscale(srf,scale_res)
-                        blksrf = pygame.Surface(self.screen_res)
-                        blksrf.blit(srf,paste_at)
+                            resolutions = self.resolutions
+                        result_surfaces = []
+
+                        for one_res in resolutions:
+                            widr = wid / one_res[0]
+                            higr = hig / one_res[1]
+                            if widr >= higr:
+                                # too wide, black bars top & bottom (or perfect fit)
+                                scale_res = (one_res[0],one_res[1]*(higr/widr))
+                                paste_at = (0,(one_res[1]-scale_res[1])/2)
+                            else:
+                                # too tall, black bars left & right
+                                scale_res = (one_res[0]*(widr/higr),one_res[1])
+                                paste_at = ((one_res[0]-scale_res[0])/2,0)
+                            srf = pygame.transform.smoothscale(srf,scale_res)
+                            blksrf = pygame.Surface(one_res)
+                            blksrf.blit(srf,paste_at)
+                            result_surfaces.append(blksrf)
 
                         # store the result, careful to protect against the list of paths having changed
                         if path in self.path_to_idx:
                             idx = self.path_to_idx[path]
-                            self.image_cache[idx] = blksrf
+                            if single_result:
+                                self.image_cache[idx] = result_surfaces[0]
+                            else:
+                                self.image_cache[idx] = tuple(result_surfaces)
                             logger.debug("Add loaded image idx %d to the cache." % idx)
 
                             # let the main thread know, in case its waiting
@@ -286,14 +310,14 @@ class ImageCache():
                     self.image_cache_lock.wait(delay)
             return self.image_cache.get(idx)
 
-    def set_screen(self, screen_res):
+    def set_screen(self, resolutions):
         """
         Throw out images that have been cached with the wrong resolution.
         """
 
         with self.image_cache_lock:
             # we need to hold the lock to coordinate with any image that may be in the loading process
-            self.screen_res = screen_res
+            self.resolutions = resolutions
             self.image_cache.clear()
 
     def set_paths(self, paths):
