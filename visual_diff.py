@@ -106,7 +106,7 @@ class ImageRow():
         self.main_missing = missing_image(self.main_dims)
         self.small_missing = missing_image(self.small_dims)
 
-        self.cache = ImageCache(self.main_dims, [x.name for x in image_info_list], args.cache_count)
+        self.cache = ImageCache((self.main_dims,self.small_dims), [x.name for x in image_info_list], args.cache_count)
 
     def set_idx(self, idx):
         """
@@ -138,10 +138,10 @@ class ImageRow():
         # determine if there are any images that are newly available
         for idx in range(self.num_surfaces):
             if self.have_idx(idx+self.idx) and not self.surfaces[idx]:
-                srf = self.cache.get_surface(idx+self.idx, delay=0)
-                if srf:
+                srfs = self.cache.get_surface(idx+self.idx, delay=0)
+                if srfs:
                     logger.info("Got an image.")
-                    self.surfaces[idx] = srf
+                    self.surfaces[idx] = srfs
                 else:
                     logger.info("Did not get a surface for idx %s." % idx)
 
@@ -155,7 +155,7 @@ class ImageRow():
                 dims = self.small_dims
             if self.surfaces[idx]:
                 # FIXME: scale correctly
-                srf = self.surfaces[idx]
+                srf = self.surfaces[idx][0 if idx == 3 else 1]
             elif idx == 3:
                 srf = loading_image(self.main_dims) if self.have_idx(idx+self.idx) else self.main_missing
             else:
