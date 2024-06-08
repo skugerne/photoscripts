@@ -75,6 +75,18 @@ def missing_image(dims):
 
 
 
+def undefined_image(dims):
+    """
+    Return a surface of the given dimentions which indicates an image that is not defined (off the end of the list).
+    """
+
+    surf = pygame.Surface(dims)
+    pygame.draw.line(surf, (40,40,40), (0,0), dims)
+    pygame.draw.line(surf, (40,40,40), (dims[0],0), (0,dims[1]))
+    return surf
+
+
+
 class ImageRow():
     def __init__(self, image_info_list, all_image_checksums, checksum_to_idx, screen_srf, upper_left, dims, num_surfaces, all_image_idx=0):
 
@@ -134,6 +146,7 @@ class ImageRow():
         logger.debug("Surface corners: %s" % str(self.surface_corn))
         self.main_missing = missing_image(self.main_dims)
         self.small_missing = missing_image(self.small_dims)
+        self.undefined_image = undefined_image(self.small_dims)
 
         # FIXME: maybe based on a de-duped list so we don't bother loading and storing duplicates
         self.cache = ImageCache((self.main_dims,self.small_dims), [x.name for x in image_info_list], args.cache_count)
@@ -156,7 +169,7 @@ class ImageRow():
 
         self.all_image_idx = new_all_image_idx
 
-    def display(self):
+    def display(self, show_paths, show_dates):
         """
         Blit images to screen.
         """
@@ -199,6 +212,7 @@ class ImageRow():
                 # we are at least not beyond the end of the main list
                 img_idx_list = self.checksum_to_info_idx.get(checksum) or []
                 if img_idx_list:
+                    pts = [self.image_info_list[x].name for x in img_idx_list]
                     dt = self.image_info_list[img_idx_list[0]].date
                     dt = "%04d-%02d-%02d" % tuple(dt[0:3])
                     msg = "%s (%sx)" % (dt,len(img_idx_list))
@@ -209,6 +223,7 @@ class ImageRow():
                     else:
                         srf = loading_image(self.small_dims)                      # working on loading it
                 else:
+                    pts = []
                     msg = "0"
                     if surf_list_idx == self.main_image_idx:
                         srf = self.main_missing
@@ -217,7 +232,8 @@ class ImageRow():
             else:
                 # this is beyond one end of the main list
                 assert surf_list_idx != self.main_image_idx, "Unexpectedly found the center image out of range."
-                srf = self.small_missing
+                srf = self.undefined_image
+                pts = []
                 msg = "-"
 
             self.screen_srf.blit(srf,corn)
@@ -227,11 +243,21 @@ class ImageRow():
                 (corn[0]+dims[0],corn[1]+dims[1]),
                 (corn[0]+dims[0],corn[1])
             )
-            pygame.draw.lines(self.screen_srf, (120,120,120), True, p)
+            pygame.draw.lines(self.screen_srf, (40,40,40), True, p)
+
+            offset = 0
             sz = 16 if surf_list_idx == self.main_image_idx else 12
-            txt_srf = text_box(msg, (150,150,220), (0,0,0), size=sz)
-            corn = (corn[0]+dims[0]/2-txt_srf.get_width()/2, self.upper_left[1]+5)
-            self.screen_srf.blit(txt_srf, corn)
+            if show_dates:
+                txt_srf = text_box(msg, (150,150,220), (0,0,0), size=sz)
+                corn2 = (corn[0]+dims[0]/2-txt_srf.get_width()/2, self.upper_left[1]+5)
+                self.screen_srf.blit(txt_srf, corn2)
+                offset += txt_srf.get_height()
+            if show_paths and surf_list_idx == self.main_image_idx:
+                for path in pts:
+                    txt_srf = text_box(path, (150,150,220), (0,0,0), size=sz)
+                    corn2 = (corn[0]+dims[0]/2-txt_srf.get_width()/2, self.upper_left[1]+5+offset)
+                    self.screen_srf.blit(txt_srf, corn2)
+                    offset += txt_srf.get_height()
 
 
 
@@ -254,6 +280,8 @@ def start_show(image_info_list_1, image_info_list_2):
     stop = False
     new_idx_chosen = True
     remake_rows = False
+    show_paths = False
+    show_dates = False
     idx = 0
     while not stop:
         if new_idx_chosen:
@@ -268,8 +296,8 @@ def start_show(image_info_list_1, image_info_list_2):
             remake_rows = False
         else:
             logger.debug("Display.")
-            upper_row.display()
-            lower_row.display()
+            upper_row.display(show_paths, show_dates)
+            lower_row.display(show_paths, show_dates)
             pygame.display.flip()
             sleep(0.05)
 
@@ -285,6 +313,10 @@ def start_show(image_info_list_1, image_info_list_2):
                 elif event.key == pygame.K_RIGHT:
                     idx += 1
                     new_idx_chosen = True
+                elif event.key == pygame.K_p:
+                    show_paths = not show_paths
+                elif event.key == pygame.K_d:
+                    show_dates = not show_dates
                 elif event.key == pygame.K_2:
                     row_width = 5
                     remake_rows = True
@@ -293,6 +325,9 @@ def start_show(image_info_list_1, image_info_list_2):
                     remake_rows = True
                 elif event.key == pygame.K_4:
                     row_width = 9
+                    remake_rows = True
+                elif event.key == pygame.K_5:
+                    row_width = 11
                     remake_rows = True
                 elif event.key == pygame.K_f:       # toggle fullscreen
                     fullscreen = not fullscreen
