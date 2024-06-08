@@ -76,7 +76,11 @@ def missing_image(dims):
 
 
 class ImageRow():
-    def __init__(self, image_info_list, all_image_checksums, checksum_to_idx, screen_srf, upper_left, dims, all_image_idx=0):
+    def __init__(self, image_info_list, all_image_checksums, checksum_to_idx, screen_srf, upper_left, dims, num_surfaces, all_image_idx=0):
+
+        # black out our part of the screen
+        screen_srf.blit(pygame.Surface(dims),upper_left)
+
         self.image_info_list = image_info_list       # InventoryItem objects for our inventory file, theoretically sorted oldest first
         self.checksum_to_info_idx = defaultdict(lambda: set())
         for idx,info in enumerate(self.image_info_list):
@@ -99,9 +103,10 @@ class ImageRow():
         # the surface we output onto (the screen, presumably)
         self.screen_srf = screen_srf
 
-        # how many images we will show in this row
-        self.main_image_idx = 3
-        self.num_surfaces = 7
+        # how many images we will show in this row (one large in the center)
+        self.num_surfaces = num_surfaces
+        small_per_side = int((self.num_surfaces-1) / 2)
+        self.main_image_idx = small_per_side
 
         # the surfaces (tuple with multiple resolutions) to show in each output location (can be None)
         # NOTE: this row may not have images for all of, or any of, the surfaces
@@ -112,8 +117,8 @@ class ImageRow():
         self.checksums_to_show = [None]*self.num_surfaces
         self.set_idx(all_image_idx)
 
-        self.main_dims = (dims[0]/3, dims[1])
-        self.small_dims = (dims[0]/9, 3*dims[1]/4)
+        self.main_dims = (dims[0]/3, dims[1])    # 1/3 center, 1/3 per side
+        self.small_dims = (dims[0]/(3*small_per_side), 3*dims[1]/4)
         logger.info("Main surface dims: %s" % str(self.main_dims))
         logger.info("Small surface dims: %s" % str(self.small_dims))
         self.surface_corn = [None]*self.num_surfaces
@@ -172,7 +177,7 @@ class ImageRow():
                     continue
                 srfs = self.cache.get_surface(our_image_idx[0], delay=0)
                 if srfs:
-                    logger.info("Got an image.")
+                    logger.debug("Got an image.")
                     self.surfaces[surf_list_idx] = srfs
                 else:
                     logger.info("Did not get a surface for surf_list_idx %s." % surf_list_idx)
@@ -226,13 +231,15 @@ def start_show(image_info_list_1, image_info_list_2):
 
     all_images, checksum_to_idx = build_date_checksum_list(image_info_list_1 + image_info_list_2)
 
+    row_width = 7
     row_dims = (screen_res[0],screen_res[1]/2)
-    upper_row = ImageRow(image_info_list_1, all_images, checksum_to_idx, screen_srf, (0,0), row_dims)
-    lower_row = ImageRow(image_info_list_2, all_images, checksum_to_idx, screen_srf, (0,screen_res[1]/2), row_dims)
+    upper_row = ImageRow(image_info_list_1, all_images, checksum_to_idx, screen_srf, (0,0), row_dims, row_width)
+    lower_row = ImageRow(image_info_list_2, all_images, checksum_to_idx, screen_srf, (0,screen_res[1]/2), row_dims, row_width)
 
     fullscreen = False
     stop = False
     new_idx_chosen = True
+    remake_rows = False
     idx = 0
     while not stop:
         if new_idx_chosen:
@@ -240,6 +247,11 @@ def start_show(image_info_list_1, image_info_list_2):
             upper_row.set_idx(idx)
             lower_row.set_idx(idx)
             new_idx_chosen = False
+        elif remake_rows:
+            logger.info("Remake image rows.")
+            upper_row = ImageRow(image_info_list_1, all_images, checksum_to_idx, screen_srf, (0,0), row_dims, row_width, upper_row.all_image_idx)
+            lower_row = ImageRow(image_info_list_2, all_images, checksum_to_idx, screen_srf, (0,screen_res[1]/2), row_dims, row_width, upper_row.all_image_idx)
+            remake_rows = False
         else:
             logger.debug("Display.")
             upper_row.display()
@@ -259,12 +271,20 @@ def start_show(image_info_list_1, image_info_list_2):
                 elif event.key == pygame.K_RIGHT:
                     idx += 1
                     new_idx_chosen = True
+                elif event.key == pygame.K_2:
+                    row_width = 5
+                    remake_rows = True
+                elif event.key == pygame.K_3:
+                    row_width = 7
+                    remake_rows = True
+                elif event.key == pygame.K_4:
+                    row_width = 9
+                    remake_rows = True
                 elif event.key == pygame.K_f:       # toggle fullscreen
                     fullscreen = not fullscreen
                     screen_res, screen_srf = apply_screen_setting(fullscreen)
                     row_dims = (screen_res[0],screen_res[1]/2)
-                    upper_row = ImageRow(image_info_list_1, all_images, checksum_to_idx, screen_srf, (0,0), row_dims, upper_row.all_image_idx)
-                    lower_row = ImageRow(image_info_list_2, all_images, checksum_to_idx, screen_srf, (0,screen_res[1]/2), row_dims, upper_row.all_image_idx)
+                    remake_rows = True
 
         if idx < 0: idx = 0
         if idx >= len(all_images): idx = len(all_images)-1
