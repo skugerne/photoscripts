@@ -172,13 +172,13 @@ class ImageRow():
 
         self.all_image_idx = new_all_image_idx
 
-    def display_one(self, surf_list_idx, show_paths, show_dates, fullscreen_mode):
+    def display_one(self, surf_list_idx, show_paths, show_dates, single_image_mode):
         """
         Display one of the images.
         """
 
         logger.debug("Draw surface %d." % surf_list_idx)
-        if fullscreen_mode:
+        if single_image_mode:
             corn = (0,0)
             dims = self.screen_srf.get_size()
         else:
@@ -199,7 +199,7 @@ class ImageRow():
                 dt = "%04d-%02d-%02d" % tuple(dt[0:3])
                 msg = "%s (%sx)" % (dt,len(img_idx_list))
                 if self.surfaces[surf_list_idx]:                  # an image we have loaded already
-                    if fullscreen_mode:
+                    if single_image_mode:
                         idx = 2
                     elif surf_list_idx == self.main_image_idx:
                         idx = 0
@@ -213,7 +213,7 @@ class ImageRow():
             else:
                 pts = []
                 msg = "0"
-                if fullscreen_mode:
+                if single_image_mode:
                     srf = self.full_missing
                 elif surf_list_idx == self.main_image_idx:
                     srf = self.main_missing
@@ -253,7 +253,7 @@ class ImageRow():
                 self.screen_srf.blit(txt_srf, corn2)
                 offset += txt_srf.get_height()
 
-    def display(self, show_paths, show_dates, fullscreen_mode):
+    def display(self, show_paths, show_dates, single_image_mode):
         """
         Blit images to screen.
         """
@@ -279,8 +279,8 @@ class ImageRow():
                 else:
                     logger.info("Did not get a surface for surf_list_idx %s." % surf_list_idx)
 
-        if fullscreen_mode:
-            self.display_one(self.main_image_idx, show_paths, show_dates, fullscreen_mode)
+        if single_image_mode:
+            self.display_one(self.main_image_idx, show_paths, show_dates, single_image_mode)
             return
 
         # black out our part of the screen
@@ -288,7 +288,7 @@ class ImageRow():
 
         # show images
         for surf_list_idx in range(self.num_surfaces):
-            self.display_one(surf_list_idx, show_paths, show_dates, fullscreen_mode)
+            self.display_one(surf_list_idx, show_paths, show_dates, single_image_mode)
 
 
 
@@ -313,7 +313,8 @@ def start_show(image_info_list_1, image_info_list_2):
     remake_rows = False
     show_paths = False
     show_dates = False
-    fullscreen_mode = False
+    single_image_mode = False
+    shift_held = False
     idx = 0
     while not stop:
         if new_idx_chosen:
@@ -329,10 +330,10 @@ def start_show(image_info_list_1, image_info_list_2):
         else:
             logger.debug("Display.")
 
-            if fullscreen_mode != 'lower':
-                upper_row.display(show_paths, show_dates, bool(fullscreen_mode == 'upper'))
-            if fullscreen_mode != 'upper':
-                lower_row.display(show_paths, show_dates, bool(fullscreen_mode == 'lower'))
+            if single_image_mode != 'lower':
+                upper_row.display(show_paths, show_dates, bool(single_image_mode == 'upper'))
+            if single_image_mode != 'upper':
+                lower_row.display(show_paths, show_dates, bool(single_image_mode == 'lower'))
 
             pygame.display.flip()
             sleep(0.05)
@@ -343,20 +344,40 @@ def start_show(image_info_list_1, image_info_list_2):
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE or event.key == pygame.K_q:
                     stop = True
+                elif event.key == pygame.K_LSHIFT:
+                    shift_held = True
                 elif event.key == pygame.K_LEFT:
-                    idx -= 1
-                    new_idx_chosen = True
+                    if idx > 0:
+                        idx -= 1
+                        if shift_held:
+                            while True:
+                                chk = all_images[idx]
+                                both = (chk in upper_row.checksum_to_info_idx) and (chk in lower_row.checksum_to_info_idx)
+                                if both and idx > 0:
+                                    idx -= 1
+                                if idx <= 0 or not both:
+                                    break
+                        new_idx_chosen = True
                 elif event.key == pygame.K_RIGHT:
-                    idx += 1
-                    new_idx_chosen = True
+                    if idx < len(all_images)-1:
+                        idx += 1
+                        if shift_held:
+                            while True:
+                                chk = all_images[idx]
+                                both = (chk in upper_row.checksum_to_info_idx) and (chk in lower_row.checksum_to_info_idx)
+                                if both and idx < len(all_images)-1:
+                                    idx += 1
+                                if idx >= len(all_images) or not both:
+                                    break
+                        new_idx_chosen = True
                 elif event.key == pygame.K_p:
                     show_paths = not show_paths
                 elif event.key == pygame.K_d:
                     show_dates = not show_dates
                 elif event.key == pygame.K_u or event.key == pygame.K_UP:
-                    fullscreen_mode = 'upper' if fullscreen_mode != 'upper' else False
+                    single_image_mode = 'upper' if single_image_mode != 'upper' else False
                 elif event.key == pygame.K_l or event.key == pygame.K_DOWN:
-                    fullscreen_mode = 'lower' if fullscreen_mode != 'lower' else False
+                    single_image_mode = 'lower' if single_image_mode != 'lower' else False
                 elif event.key == pygame.K_2:
                     row_width = 5
                     remake_rows = True
@@ -374,6 +395,9 @@ def start_show(image_info_list_1, image_info_list_2):
                     screen_res, screen_srf = apply_screen_setting(fullscreen)
                     row_dims = (screen_res[0],screen_res[1]/2)
                     remake_rows = True
+            elif event.type == pygame.KEYUP:
+                if event.key == pygame.K_LSHIFT:
+                    shift_held = False
 
         if idx < 0: idx = 0
         if idx >= len(all_images): idx = len(all_images)-1
