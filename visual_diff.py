@@ -25,18 +25,19 @@ args = None
 
 def build_date_checksum_list(image_info_list):
     """
-    Convert a list of InventoryItem to a list of tuples (date,checksum) and a dict of checksums pointing indexes in the list of tuples.
+    Convert a list of InventoryItem to a list checksums and a dict of checksums pointing indexes in the list of checksums.
     """
 
     image_list = set()
     for image_info in image_info_list:
         image_list.add((image_info.date,image_info.checksum))
     image_list = sorted(image_list)
+    image_list = [x[1] for x in image_list]
 
     checksum_to_idx = dict()
-    for idx,vals in enumerate(image_list):
-        assert vals[1] not in checksum_to_idx, "Apparently we have images with the same checksum but different dates."
-        checksum_to_idx[vals[1]] = idx
+    for idx,checksum in enumerate(image_list):
+        assert checksum not in checksum_to_idx, "Apparently we have images with the same checksum but different dates."
+        checksum_to_idx[checksum] = idx
 
     logger.info("Combined list contains %d images." % len(image_list))
     return image_list, checksum_to_idx
@@ -75,25 +76,41 @@ def missing_image(dims):
 
 
 class ImageRow():
-    def __init__(self, image_info_list, all_images, checksum_to_idx, screen_srf, upper_left, dims, all_image_idx=0):
+    def __init__(self, image_info_list, all_image_checksums, checksum_to_idx, screen_srf, upper_left, dims, all_image_idx=0):
         self.image_info_list = image_info_list       # InventoryItem objects for our inventory file, theoretically sorted oldest first
-        self.own_images, self.own_checksum_to_idx = build_date_checksum_list(image_info_list)
-        self.own_checksum_to_info_idx = defaultdict(lambda: set())
+        self.checksum_to_info_idx = defaultdict(lambda: set())
         for idx,info in enumerate(self.image_info_list):
-            self.own_checksum_to_info_idx[info.checksum].add(idx)
-        for checksum in self.own_checksum_to_info_idx.keys():
-            self.own_checksum_to_info_idx[checksum] = tuple(sorted(self.own_checksum_to_info_idx[checksum]))
+            self.checksum_to_info_idx[info.checksum].add(idx)
+        for checksum in self.checksum_to_info_idx.keys():
+            self.checksum_to_info_idx[checksum] = tuple(sorted(self.checksum_to_info_idx[checksum]))
 
-        self.all_images = all_images                 # sorted tuples (date,checksum) for both inventory files, sorted oldest first
-        self.all_checksum_to_idx = checksum_to_idx   # checksums pointing to indexes in 'all_images'
+        # checksums for images from both inventory files, sorted oldest first
+        self.all_image_checksums = all_image_checksums
+
+        # checksums pointing to indexes in 'all_images'
+        self.all_checksum_to_idx = checksum_to_idx
+
+        # the index in 'all_images' that is to be displayed in the center of the row
         self.all_image_idx = all_image_idx
-        self.upper_left = upper_left
-        self.dims = dims
 
+        # upper left corner coordinate for the row (relative to 'screen_srf')
+        self.upper_left = upper_left
+
+        # the surface we output onto (the screen, presumably)
         self.screen_srf = screen_srf
+
+        # how many images we will show in this row
         self.main_image_idx = 3
         self.num_surfaces = 7
+
+        # the surfaces (tuple with multiple resolutions) to show in each output location (can be None)
+        # NOTE: this row may not have images for all of, or any of, the surfaces
         self.surfaces = [None]*self.num_surfaces
+
+        # the checksums of images to show in each output location (can be None when extending beyond the image list)
+        # NOTE: these checksums refer to images that may or may not be present in this row
+        self.checksums_to_show = [None]*self.num_surfaces
+        self.set_idx(all_image_idx)
 
         self.main_dims = (dims[0]/3, dims[1])
         self.small_dims = (dims[0]/9, 3*dims[1]/4)
@@ -113,7 +130,7 @@ class ImageRow():
         self.main_missing = missing_image(self.main_dims)
         self.small_missing = missing_image(self.small_dims)
 
-        # FIXME: maybe based on a de-duped list
+        # FIXME: maybe based on a de-duped list so we don't bother loading and storing duplicates
         self.cache = ImageCache((self.main_dims,self.small_dims), [x.name for x in image_info_list], args.cache_count)
 
     def set_idx(self, new_all_image_idx):
@@ -121,37 +138,18 @@ class ImageRow():
         Set the given image to be the main one.  The given index is the global-list index of an image which we may or may not have in this row.
         """
 
-        diff = new_all_image_idx - self.all_image_idx
-        if not diff:
-            return
-        
-        new_surfaces = [None] * self.num_surfaces
-        for old_idx in range(len(self.surfaces)):
-            new_idx = old_idx - diff
-            if new_idx >= 0 and new_idx < self.num_surfaces:
-                new_surfaces[new_idx] = self.surfaces[old_idx]
+        for surf_list_idx in range(self.num_surfaces):
 
-        self.surfaces = new_surfaces
+            # unlink whatever image we might have been displaying here
+            self.surfaces[surf_list_idx] = None
+
+            srcidx = surf_list_idx + new_all_image_idx - self.main_image_idx
+            if srcidx >= 0 and srcidx < len(self.all_image_checksums):
+                self.checksums_to_show[surf_list_idx] = self.all_image_checksums[srcidx]
+            else:
+                self.checksums_to_show[surf_list_idx] = None
+
         self.all_image_idx = new_all_image_idx
-
-    def get_our_idx(self, all_image_idx):
-        """
-        Given the global-list index of an image, return the our-list index for it, or None if we do not have it.
-        """
-
-        _, checksum = self.all_images[all_image_idx]
-        return self.own_checksum_to_idx.get(checksum)
-
-    def get_our_info_idx(self, all_image_idx):
-        """
-        Given the global-list index of an image, return the our-list index for it, or None if we do not have it.
-        """
-
-        _, checksum = self.all_images[all_image_idx]
-        info = self.own_checksum_to_info_idx.get(checksum)
-        if info == None:
-            return None
-        return info[0]
 
     def display(self):
         """
@@ -159,13 +157,20 @@ class ImageRow():
         """
 
         # determine if there are any images that are ready for display
+        # after this stage, self.surfaces can contain a mix of None and surface tuples
         for surf_list_idx in range(self.num_surfaces):
-            all_image_idx = surf_list_idx + self.all_image_idx - self.main_image_idx
-            if all_image_idx < 0 or all_image_idx >= len(self.all_images):
+            if self.surfaces[surf_list_idx]:
+                # we already have something to show in this slot, so don't think too hard about it
                 continue
-            our_idx = self.get_our_info_idx(all_image_idx)
-            if not (our_idx == None or self.surfaces[surf_list_idx]):
-                srfs = self.cache.get_surface(our_idx, delay=0)
+
+            checksum = self.checksums_to_show[surf_list_idx]
+            if checksum:
+                # we are at least not beyond the end of the main list
+                our_image_idx = self.checksum_to_info_idx.get(checksum)
+                if not our_image_idx:   # tuple of indexes or None
+                    # this is not an image we have in this row
+                    continue
+                srfs = self.cache.get_surface(our_image_idx[0], delay=0)
                 if srfs:
                     logger.info("Got an image.")
                     self.surfaces[surf_list_idx] = srfs
@@ -181,23 +186,26 @@ class ImageRow():
             else:
                 dims = self.small_dims
 
-            all_image_idx = surf_list_idx + self.all_image_idx - self.main_image_idx
-            if all_image_idx < 0 or all_image_idx >= len(self.all_images):
-                assert surf_list_idx != self.main_image_idx, "The center image should not leave the ends of the image list."
-                srf = self.small_missing                                      # images beyond the end of the combined list
-            else:
-                our_idx = self.get_our_info_idx(all_image_idx)
-                if our_idx == None:                                           # images our row lacks
+            checksum = self.checksums_to_show[surf_list_idx]
+            if checksum:
+                # we are at least not beyond the end of the main list
+                if not self.checksum_to_info_idx.get(checksum):   # tuple of indexes or None
+                    # this is not an image we have in this row
                     if surf_list_idx == self.main_image_idx:
                         srf = self.main_missing
                     else:
                         srf = self.small_missing
-                elif self.surfaces[our_idx]:                                  # an image we have loaded already
-                    srf = self.surfaces[our_idx][0 if surf_list_idx == self.main_image_idx else 1]   # surface idx 0 is large, idx 1 is small
+                elif self.surfaces[surf_list_idx]:                                  # an image we have loaded already
+                    srf = self.surfaces[surf_list_idx][0 if surf_list_idx == self.main_image_idx else 1]   # surface idx 0 is large, idx 1 is small
                 elif surf_list_idx == self.main_image_idx:
                     srf = loading_image(self.main_dims)                       # working on loading it
                 else:
                     srf = loading_image(self.small_dims)                      # working on loading it
+            else:
+                # this is beyond one end of the main list
+                assert surf_list_idx != self.main_image_idx, "Unexpectedly found the center image out of range."
+                srf = self.small_missing
+
             self.screen_srf.blit(srf,corn)
             p = (
                 corn,
@@ -255,8 +263,8 @@ def start_show(image_info_list_1, image_info_list_2):
                     fullscreen = not fullscreen
                     screen_res, screen_srf = apply_screen_setting(fullscreen)
                     row_dims = (screen_res[0],screen_res[1]/2)
-                    upper_row = ImageRow(image_info_list_1, all_images, checksum_to_idx, screen_srf, (0,0), row_dims, upper_row.idx)
-                    lower_row = ImageRow(image_info_list_2, all_images, checksum_to_idx, screen_srf, (0,screen_res[1]/2), row_dims, upper_row.idx)
+                    upper_row = ImageRow(image_info_list_1, all_images, checksum_to_idx, screen_srf, (0,0), row_dims, upper_row.all_image_idx)
+                    lower_row = ImageRow(image_info_list_2, all_images, checksum_to_idx, screen_srf, (0,screen_res[1]/2), row_dims, upper_row.all_image_idx)
 
         if idx < 0: idx = 0
         if idx >= len(all_images): idx = len(all_images)-1
