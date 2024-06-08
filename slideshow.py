@@ -266,9 +266,9 @@ class ImageCache():
                                 # too tall, black bars left & right
                                 scale_res = (one_res[0]*(widr/higr),one_res[1])
                                 paste_at = ((one_res[0]-scale_res[0])/2,0)
-                            srf = pygame.transform.smoothscale(srf,scale_res)
+                            srf2 = pygame.transform.smoothscale(srf,scale_res)
                             blksrf = pygame.Surface(one_res)
-                            blksrf.blit(srf,paste_at)
+                            blksrf.blit(srf2,paste_at)
                             result_surfaces.append(blksrf)
 
                         # store the result, careful to protect against the list of paths having changed
