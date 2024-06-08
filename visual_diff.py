@@ -78,9 +78,6 @@ def missing_image(dims):
 class ImageRow():
     def __init__(self, image_info_list, all_image_checksums, checksum_to_idx, screen_srf, upper_left, dims, num_surfaces, all_image_idx=0):
 
-        # black out our part of the screen
-        screen_srf.blit(pygame.Surface(dims),upper_left)
-
         self.image_info_list = image_info_list       # InventoryItem objects for our inventory file, theoretically sorted oldest first
         self.checksum_to_info_idx = defaultdict(lambda: set())
         for idx,info in enumerate(self.image_info_list):
@@ -99,6 +96,9 @@ class ImageRow():
 
         # upper left corner coordinate for the row (relative to 'screen_srf')
         self.upper_left = upper_left
+
+        # the dimentions of the row, essentially the lower right corner (relative to 'screen_srf')
+        self.dims = dims
 
         # the surface we output onto (the screen, presumably)
         self.screen_srf = screen_srf
@@ -131,7 +131,7 @@ class ImageRow():
                 offset = (self.main_dims[1] - self.small_dims[1]) / 2
                 self.surface_corn[idx] = (x,self.upper_left[1]+offset)
                 x += self.small_dims[0]
-        logger.info("Surface corners: %s" % str(self.surface_corn))
+        logger.debug("Surface corners: %s" % str(self.surface_corn))
         self.main_missing = missing_image(self.main_dims)
         self.small_missing = missing_image(self.small_dims)
 
@@ -160,6 +160,9 @@ class ImageRow():
         """
         Blit images to screen.
         """
+
+        # black out our part of the screen
+        self.screen_srf.blit(pygame.Surface(self.dims), self.upper_left)
 
         # determine if there are any images that are ready for display
         # after this stage, self.surfaces can contain a mix of None and surface tuples
@@ -194,22 +197,28 @@ class ImageRow():
             checksum = self.checksums_to_show[surf_list_idx]
             if checksum:
                 # we are at least not beyond the end of the main list
-                if not self.checksum_to_info_idx.get(checksum):   # tuple of indexes or None
-                    # this is not an image we have in this row
+                img_idx_list = self.checksum_to_info_idx.get(checksum) or []
+                if img_idx_list:
+                    dt = self.image_info_list[img_idx_list[0]].date
+                    dt = "%04d-%02d-%02d" % tuple(dt[0:3])
+                    msg = "%s (%sx)" % (dt,len(img_idx_list))
+                    if self.surfaces[surf_list_idx]:                              # an image we have loaded already
+                        srf = self.surfaces[surf_list_idx][0 if surf_list_idx == self.main_image_idx else 1]   # surface idx 0 is large, idx 1 is small
+                    elif surf_list_idx == self.main_image_idx:
+                        srf = loading_image(self.main_dims)                       # working on loading it
+                    else:
+                        srf = loading_image(self.small_dims)                      # working on loading it
+                else:
+                    msg = "0"
                     if surf_list_idx == self.main_image_idx:
                         srf = self.main_missing
                     else:
                         srf = self.small_missing
-                elif self.surfaces[surf_list_idx]:                                  # an image we have loaded already
-                    srf = self.surfaces[surf_list_idx][0 if surf_list_idx == self.main_image_idx else 1]   # surface idx 0 is large, idx 1 is small
-                elif surf_list_idx == self.main_image_idx:
-                    srf = loading_image(self.main_dims)                       # working on loading it
-                else:
-                    srf = loading_image(self.small_dims)                      # working on loading it
             else:
                 # this is beyond one end of the main list
                 assert surf_list_idx != self.main_image_idx, "Unexpectedly found the center image out of range."
                 srf = self.small_missing
+                msg = "-"
 
             self.screen_srf.blit(srf,corn)
             p = (
@@ -219,6 +228,11 @@ class ImageRow():
                 (corn[0]+dims[0],corn[1])
             )
             pygame.draw.lines(self.screen_srf, (120,120,120), True, p)
+            sz = 16 if surf_list_idx == self.main_image_idx else 12
+            txt_srf = text_box(msg, (150,150,220), (0,0,0), size=sz)
+            corn = (corn[0]+dims[0]/2-txt_srf.get_width()/2, self.upper_left[1]+5)
+            self.screen_srf.blit(txt_srf, corn)
+
 
 
 
