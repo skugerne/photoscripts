@@ -227,7 +227,6 @@ class ImageRow():
             msg = "-"
 
         # show the image (or placeholder)
-        logger.info("Blit image size %s" % str(srf.get_size()))
         self.screen_srf.blit(srf,corn)
 
         # draw a gray border
