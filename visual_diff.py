@@ -96,6 +96,7 @@ class ImageRow():
             self.checksum_to_info_idx[info.checksum].add(idx)
         for checksum in self.checksum_to_info_idx.keys():
             self.checksum_to_info_idx[checksum] = tuple(sorted(self.checksum_to_info_idx[checksum]))
+        logger.info("Row has %d distinct checkums from %d image paths." % (len(self.checksum_to_info_idx),len(image_info_list)))
 
         # checksums for images from both inventory files, sorted oldest first
         self.all_image_checksums = all_image_checksums
@@ -196,8 +197,7 @@ class ImageRow():
                 # we have am image, which may or may no be loaded yet
                 pts = [self.image_info_list[x].name for x in img_idx_list]
                 dt = self.image_info_list[img_idx_list[0]].date
-                dt = "%04d-%02d-%02d" % tuple(dt[0:3])
-                msg = "%s (%sx)" % (dt,len(img_idx_list))
+                msg = "%04d-%02d-%02d" % tuple(dt[0:3])
                 if self.surfaces[surf_list_idx]:                  # an image we have loaded already
                     if single_image_mode:
                         idx = 2
@@ -212,7 +212,7 @@ class ImageRow():
                     srf = loading_image(self.small_dims)          # working on loading it
             else:
                 pts = []
-                msg = "0"
+                msg = ""
                 if single_image_mode:
                     srf = self.full_missing
                 elif surf_list_idx == self.main_image_idx:
@@ -241,9 +241,18 @@ class ImageRow():
         # show annotations
         offset = 0
         sz = 16 if surf_list_idx == self.main_image_idx else 12
-        if show_dates:
+        if (show_dates or show_paths) and surf_list_idx == self.main_image_idx:
+            showing_idx = self.all_checksum_to_idx.get(self.all_image_checksums[self.all_image_idx])
+            #logger.info("IDX %d" % showing_idx)
+            if showing_idx != None:
+                txt = "%d of %d" % (showing_idx,len(self.all_checksum_to_idx))
+                txt_srf = text_box(txt, (150,220,150), (0,0,0), size=sz)
+                corn2 = (corn[0]+dims[0]/2-txt_srf.get_width()/2, self.upper_left[1]+5+offset)
+                self.screen_srf.blit(txt_srf, corn2)
+                offset += txt_srf.get_height()
+        if show_dates and msg:
             txt_srf = text_box(msg, (150,150,220), (0,0,0), size=sz)
-            corn2 = (corn[0]+dims[0]/2-txt_srf.get_width()/2, self.upper_left[1]+5)
+            corn2 = (corn[0]+dims[0]/2-txt_srf.get_width()/2, self.upper_left[1]+5+offset)
             self.screen_srf.blit(txt_srf, corn2)
             offset += txt_srf.get_height()
         if show_paths and surf_list_idx == self.main_image_idx:
@@ -365,7 +374,7 @@ def start_show(image_info_list_1, image_info_list_2):
                             while True:
                                 chk = all_images[idx]
                                 both = (chk in upper_row.checksum_to_info_idx) and (chk in lower_row.checksum_to_info_idx)
-                                if both and idx < len(all_images)-1:
+                                if both and idx < len(all_images):
                                     idx += 1
                                 if idx >= len(all_images) or not both:
                                     break
