@@ -245,7 +245,7 @@ class ImageRow():
             showing_idx = self.all_checksum_to_idx.get(self.all_image_checksums[self.all_image_idx])
             #logger.info("IDX %d" % showing_idx)
             if showing_idx != None:
-                txt = "%d of %d" % (showing_idx,len(self.all_checksum_to_idx))
+                txt = "%d of %d" % (showing_idx+1,len(self.all_checksum_to_idx))
                 txt_srf = text_box(txt, (150,220,150), (0,0,0), size=sz)
                 corn2 = (corn[0]+dims[0]/2-txt_srf.get_width()/2, self.upper_left[1]+5+offset)
                 self.screen_srf.blit(txt_srf, corn2)
@@ -301,6 +301,57 @@ class ImageRow():
 
 
 
+def scan_for_diff(all_images, idx, upper_row, lower_row, direction):
+    """
+    Scan up or down the list looking for a difference.  Only finds differences after first finding a not-difference.
+    Returned idx can be beyond the ends of the list.
+    """
+
+    hit_both = False
+    while True:
+        chk = all_images[idx]
+        both = (chk in upper_row.checksum_to_info_idx) and (chk in lower_row.checksum_to_info_idx)
+        if both:
+            hit_both = True
+        if (both or not hit_both) and idx >= 0 and idx < len(all_images):
+            idx += direction
+        if idx <= 0 or idx >= len(all_images) or (hit_both and not both):
+            break
+
+    return idx
+
+
+
+def scan_for_next_month(all_images, idx, upper_row, lower_row, direction):
+    """
+    Scan up or down the list looking for an image with a different month.
+    """
+
+
+    def get_month(at_idx):
+        chk = all_images[at_idx]
+        info = upper_row.checksum_to_info_idx.get(chk)
+        if info:
+            return upper_row.image_info_list[info[0]].date[1]
+        else:
+            info = lower_row.checksum_to_info_idx.get(chk)
+            assert info, "Somehow have an index without date info."
+            return lower_row.image_info_list[info[0]].date[1]
+
+    current_month = get_month(idx)
+    while True:
+        newidx = idx+direction
+        if newidx >= 0 and newidx < len(all_images):
+            idx = newidx
+        else:
+            break
+        this_month = get_month(idx)
+        if this_month != current_month:
+            break
+
+    return idx
+
+
 
 def start_show(image_info_list_1, image_info_list_2):
     logger.info("Start.")
@@ -324,7 +375,26 @@ def start_show(image_info_list_1, image_info_list_2):
     show_dates = False
     single_image_mode = False
     shift_held = False
+    ctrl_held = False
+    tab_held = False
     idx = 0
+
+    def next_image(start_idx, direction):
+        if shift_held:
+            start_idx = scan_for_diff(all_images, start_idx, upper_row, lower_row, direction)
+        else:
+            if tab_held:
+                if ctrl_held:
+                    for _ in range(5):
+                        start_idx = scan_for_next_month(all_images, start_idx, upper_row, lower_row, direction)
+                else:
+                    start_idx += direction*10              # list end limit is enforced before use
+            elif ctrl_held:
+                start_idx = scan_for_next_month(all_images, start_idx, upper_row, lower_row, direction)
+            else:
+                start_idx += direction
+        return start_idx
+
     while not stop:
         if new_idx_chosen:
             logger.info("Update chosen image.")
@@ -355,29 +425,17 @@ def start_show(image_info_list_1, image_info_list_2):
                     stop = True
                 elif event.key == pygame.K_LSHIFT:
                     shift_held = True
+                elif event.key == pygame.K_TAB:
+                    tab_held = True
+                elif event.key == pygame.K_LCTRL:
+                    ctrl_held = True
                 elif event.key == pygame.K_LEFT:
                     if idx > 0:
-                        idx -= 1
-                        if shift_held:
-                            while True:
-                                chk = all_images[idx]
-                                both = (chk in upper_row.checksum_to_info_idx) and (chk in lower_row.checksum_to_info_idx)
-                                if both and idx > 0:
-                                    idx -= 1
-                                if idx <= 0 or not both:
-                                    break
+                        idx = next_image(idx, -1)
                         new_idx_chosen = True
                 elif event.key == pygame.K_RIGHT:
                     if idx < len(all_images)-1:
-                        idx += 1
-                        if shift_held:
-                            while True:
-                                chk = all_images[idx]
-                                both = (chk in upper_row.checksum_to_info_idx) and (chk in lower_row.checksum_to_info_idx)
-                                if both and idx < len(all_images):
-                                    idx += 1
-                                if idx >= len(all_images) or not both:
-                                    break
+                        idx = next_image(idx, 1)
                         new_idx_chosen = True
                 elif event.key == pygame.K_p:
                     show_paths = not show_paths
@@ -407,6 +465,11 @@ def start_show(image_info_list_1, image_info_list_2):
             elif event.type == pygame.KEYUP:
                 if event.key == pygame.K_LSHIFT:
                     shift_held = False
+                if event.key == pygame.K_TAB:
+                    tab_held = False
+                if event.key == pygame.K_LCTRL:
+                    ctrl_held = False
+
 
         if idx < 0: idx = 0
         if idx >= len(all_images): idx = len(all_images)-1
